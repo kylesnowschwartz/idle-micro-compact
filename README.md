@@ -1,140 +1,208 @@
 # idle-micro-compact
 
-A [Claude Code](https://code.claude.com) mod that compacts an idle session shortly before its 1-hour
-prompt cache expires, and tries the cheap compaction first. When masking old tool results and dropping
-thinking would make the conversation small enough, it does only that, with no model call. Otherwise it
-writes the usual summary.
+`idle-micro-compact` compacts an idle Claude Code conversation before its 1-hour prompt cache
+expires. It masks old tool output, drops thinking, or asks Claude Code to write a summary. This can
+lower the cache-write cost when you return.
 
-It combines two mods:
+## What it saves
 
-- [davidar/claude-idle-compact](https://github.com/davidar/claude-idle-compact) (MIT): the idle timer,
-  the size floor, the late-timer check, the summary instructions and the log wording. `hooks/register.ts`
-  and `tests/register.test.ts` are adapted from it.
-- [ruihe774/cc-micro-compaction](https://github.com/ruihe774/cc-micro-compaction) (Unlicense):
-  `microCompact`, which replaces each `Read` result with a one-line placeholder naming the file and
-  line range, and drops thinking blocks. `hooks/mask.ts` and `tests/mask.test.ts` are derived from it.
+One idle 150k-token conversation on Claude Opus 5.5, from the idle pause to your first message back:
 
-## What it does
+| What happens | Tokens re-cached on return | Total cost | Saved with the plugin |
+|---|---:|---:|---:|
+| Without the plugin: nothing | 150k | $1.20 | — |
+| Without the plugin: `/compact` after the cache expired | 10k | $1.48 | −$0.28 |
+| With the plugin: summary before the cache expires | 10k | $0.31 | $0.89 (74%) |
+| With the plugin: old tool results masked | 50k | $0.40 | $0.80 (67%) |
 
-After every main-loop turn it arms a timer (`idleMinutes`, default 50). The next turn, `/clear` or
-exit cancels it; a reload re-arms it for the time left. When the timer fires:
+"Saved with the plugin" is the difference from the first row. The total cost is the compaction
+request plus the first request when you return:
 
-1. If the conversation (the Messages row of `/context`) is under `minTokens` (default 40000), it does
-   nothing and says so: `not compacted: the conversation is 12k tokens, under the 40k floor`.
-2. If the timer fired more than an hour after the last turn (the machine slept), the 1-hour cache has
-   already lapsed. It does nothing and says so. An `idleMinutes` of 60 or more leaves no warm window.
-3. Otherwise it runs `/compact` with idle-compact's summary instructions. Its own `session.compact`
-   hook picks that compaction out by the instructions' opening words and masks the transcript
-   (below). It estimates the size afterwards as the Messages row before, less the removed text and
-   the dropped thinking, at the conversation's own rate: its visible characters per token.
-   - At or under `microTargetTokens` (default 150000), it installs the masked transcript itself. No
-     summary request is made.
-   - Over the target, or when there was nothing to mask, it hands the compaction to Claude Code's
-     own summary.
+- Without the plugin, `/compact` on a cold cache writes all 150k tokens ($1.20) and 10k of summary
+  output ($0.20).
+- With the plugin, the summary request reads the 150k tokens from cache ($0.03) and writes 10k of
+  output ($0.20). Masking makes no model call ($0).
+- The first request back writes the remaining conversation to a new cache at $8 per million tokens.
 
-Masking covers the results of `Read`, `Bash`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, `Edit`,
-`Write`, `MultiEdit` and MCP tools. The 5 newest of those calls keep their results whole; calls to
-other tools, such as the todo list or a subagent, don't count toward the 5. Older results change:
+Assumptions:
 
-- A `Read` result becomes a one-line placeholder naming the file and the lines read; an image or
-  PDF becomes one naming the file.
-- `Bash`, `Grep`, `Glob` and `WebFetch` output keeps its first 15 and last 15 lines, with a marker
-  for the lines between, when that is shorter. A head or tail over 1500 characters keeps its first
-  (head) or last (tail) 1500, with a marker where it was cut. Other output becomes a placeholder
-  naming what to rerun.
-- An `Edit`, `Write` or `MultiEdit` result becomes a placeholder naming the file, saying the change
-  is made and to read the file again if needed.
-- An error keeps its first 400 characters.
-- Results of 200 characters or less stay whole.
+- Claude Opus 5.5 first-party API prices per million tokens: $4 base input, $8 for a 1-hour cache
+  write, $0.20 for a cache read, and $20 output.
+- The plugin fires after 50 minutes idle. You return after the 1-hour cache expires.
+- A summary is 10k tokens. Masking leaves 50k tokens.
+- A request on a cold cache is billed as a 1-hour cache write.
+- System prompts, tools, and thinking tokens are left out.
 
-Every placeholder and marker lists the file paths the removed text named, up to 50. Thinking blocks
-are dropped. A second pass leaves placeholders and markers alone.
-
-The removed thinking is counted from the conversation's Messages API form
-(`$.session.messages({ as: 'api' })`). A thinking block sent back holds only its signature, so its
-size is estimated as 1.218 × the signature's length + 81.6 characters, or its text's length when it
-holds text. When that form can't be read, the thinking counts as nothing, both in the rate and in
-what is removed.
-
-Either way it leaves one line in the transcript and the status line. For example:
-
-```
-● idle-micro-compact: micro-compacted at 15:18 after 1 min idle (76k conversation → est. 27k, measured 7k; 9 tool results masked, 2 trimmed to head and tail, 2 thinking blocks dropped, no model call)
-● idle-micro-compact: compacted at 14:40 after 1 min idle (micro est. 81k, over the 1 target; 88k tokens → 10k summary, measured 14k, 48% read from cache)
-```
-
-`est.` is the estimate the decision used. `measured` is the Messages row `/context` reports straight
-after the compaction. On the summary line, the first figure is the whole context before and the second
-is the summary alone, as idle-compact reports them.
-
-If the idle compaction fails, it logs one line with the reason, `not compacted: <reason>`, and sets
-no status. The next turn arms the timer again.
-
-It goes through `/compact` rather than `$.session.compact` because Claude Code does not run a plugin's
-own hooks on an event that plugin's code raised outside a hook, such as from a timer. Through the
-command, the mod's `session.compact` hook sees the compaction. As a result the transcript records it
-as a manual `/compact`, and the `/compact …` line shows in the transcript.
-
-## Caveats
-
-- **The estimate errs slightly low.** It counts only the characters `$.session.messages()` shows
-  (message text, tool inputs and tool results) and the estimated thinking, and divides them by the
-  measured tokens to get the rate. Context with no text there, such as images, loaded instruction
-  files and reminders, stays in the token count, so the rate reads a little low and the estimate
-  falls short by at most that hidden content times the share removed. It also misses what masking
-  an image saves.
-- **Micro-compaction rewrites the transcript from the first change on**, usually the first thinking
-  block. The next request re-caches from that point. That is cheaper than re-caching the whole
-  conversation cold, but it is not free.
-- **Masked output is gone from context.** The placeholder or marker names the file to read again or
-  the command to rerun, and the files the removed text named.
-- **It assumes a 1-hour cache**, like idle-compact. On a 5-minute cache it fires long after the cache
-  is cold.
+Compacting cold pays to send the whole conversation once just to shrink it. Compacting while warm
+reads it from cache at 5% of the base input price. These figures are an example. Actual savings
+depend on the conversation size.
 
 ## Install
-
-The repository is private, so your `gh` or git login must have read access to it.
 
 ```sh
 claude plugin marketplace add kylesnowschwartz/idle-micro-compact
 claude plugin install idle-micro-compact@idle-micro-compact
 ```
 
-Then run `/reload-plugins` in an open session.
+Run `/reload-plugins` in each open Claude Code session after installation.
+
+The mod registers hooks for session and turn events. It reads conversation usage and messages,
+stores the last turn time in Claude Code's plugin state, runs the built-in `/compact` command, and
+writes a transcript log line and status line. It does not add a command of its own.
 
 ## Configure
 
+The defaults work with a 1-hour prompt cache. Configure the options inside Claude Code:
+
+```text
+/plugin configure idle-micro-compact
+```
+
+Or configure them from a shell:
+
+```sh
+claude plugin configure idle-micro-compact
+```
+
+To edit the options by hand, add them to your user settings at `~/.claude/settings.json`. Claude
+Code reads plugin options from user settings, not from a project's `.claude/settings.json`.
+
+```json
+{
+  "pluginConfigs": {
+    "idle-micro-compact@idle-micro-compact": {
+      "options": {
+        "idleMinutes": 50,
+        "minTokens": 40000,
+        "microTargetTokens": 150000
+      }
+    }
+  }
+}
+```
+
 | Option | Default | Meaning |
-|---|---|---|
-| `idleMinutes` | `50` | Minutes idle before compacting. |
-| `minTokens` | `40000` | Leave conversations smaller than this alone (the Messages row only). |
-| `microTargetTokens` | `150000` | Use micro-compaction (masking, no model call) when it is estimated to leave the conversation at or under this. |
+|---|---:|---|
+| `idleMinutes` | `50` | Minutes idle before compacting. `0` also uses the 50-minute default. |
+| `minTokens` | `40000` | Leave smaller conversations alone. This counts the Messages row, not the system prompt or tools. |
+| `microTargetTokens` | `150000` | Use masking with no model call when the estimated result is at or below this size. |
+
+Set `idleMinutes` below `60`. A value of `60` or more leaves no warm-cache window, so the mod skips
+compaction when the timer fires.
+
+## How it works
+
+After each main-session turn, the mod starts an idle timer. A new turn, `/clear`, or session exit
+cancels it. Reloading the plugin restarts the timer with the time left since the last turn.
+
+When the timer fires, the mod follows these steps:
+
+1. It reads the conversation size from the Messages row of `/context`. If that row is unavailable,
+   it uses the whole context. If the size is unknown, it leaves the session alone.
+2. It skips conversations below `minTokens`.
+3. It skips compaction if the timer fired after the 1-hour cache deadline, such as after the machine
+   slept.
+4. It runs `/compact`. Its compaction hook masks old tool results and drops thinking, then estimates
+   the remaining conversation size.
+5. If masking changed the transcript and the estimate is at or below `microTargetTokens`, it installs
+   the masked transcript with no model call. Otherwise, Claude Code writes a summary.
+
+The automatic request appears in the transcript as a manual `/compact` line.
+
+## What micro-compaction keeps and drops
+
+| Result | What stays |
+|---|---|
+| `Read` text | A shorter one-line placeholder with the file and line range. |
+| Images and PDFs | A placeholder with the file name. |
+| `Bash`, `Grep`, `Glob`, `WebFetch` output | The first and last 15 lines when shorter. Otherwise, a placeholder. Each end has a 1,500-character cap. |
+| Other tool results | A placeholder naming the file, search, URL, command, or MCP call. File changes say to read the file. This includes `WebSearch`, `Edit`, `Write`, `MultiEdit`, and MCP tools. |
+| Errors | The first 400 characters when shorter. Other errors stay whole. |
+| Thinking blocks | Nothing. They are dropped. |
+
+The 5 newest calls to these tools stay whole. Todo and subagent calls do not count toward the 5.
+Text results of 200 characters or less stay whole. Masked output must be read or rerun to recover it.
+Placeholders and markers list up to 50 paths from removed text. A later pass leaves them unchanged.
+
+## How much micro-compaction removes
+
+Across 50 idle points from 44 of the author's real Claude Code sessions, this method removed a median 54% of the conversation, against 39% for the upstream method of masking only `Read` results and dropping thinking.
+It lost none of the file paths used in the next three turns.
+This was an offline benchmark on one person's sessions. It checked paths by string match.
+
+## Log lines
+
+After a successful compaction, the mod writes the same line to the transcript and the status area.
+The next turn clears the status. Examples:
+
+```text
+● idle-micro-compact: micro-compacted at 15:18 after 1 min idle (76k conversation → est. 27k, measured 7k; 9 tool results masked, 2 trimmed to head and tail, 2 thinking blocks dropped, no model call)
+● idle-micro-compact: compacted at 14:40 after 1 min idle (micro est. 81k, over the 1 target; 88k tokens → 10k summary, measured 14k, 48% read from cache)
+```
+
+- `est.` is the estimate used to choose micro-compaction or a summary.
+- `measured` is the Messages row reported after compaction.
+- On a summary line, the first size is the whole context. The second is the summary alone.
+- The cache percentage is the share of the summary request input read from cache.
+- `not compacted:` appears for a known-small or late conversation, or a failed compaction. It does
+  not set a status.
+
+No line appears if the size is unknown, a turn overtakes the timer, or Claude Code skips compaction.
+
+## Caveats
+
+- **The estimate can be slightly low.** It uses visible message text, tool inputs, tool results, and
+  estimated thinking. Images, loaded instruction files, reminders, and other hidden context remain
+  in the token count. The estimate also cannot measure what masking an image saves.
+- **Micro-compaction rewrites the transcript from the first changed message.** The next request
+  re-caches from that point. This is cheaper than re-caching the whole conversation cold, but it is
+  not free.
+- **Masked output is removed from context.** The replacement names what Claude can read or rerun,
+  but the removed content itself is unavailable.
+- **The timing assumes a 1-hour cache.** With a 5-minute cache, the default timer fires after the
+  cache is cold.
+
+## Upstream projects
+
+This mod combines work from two projects:
+
+- [davidar/claude-idle-compact](https://github.com/davidar/claude-idle-compact) (MIT) provides the
+  idle timer, size floor, late-timer check, summary instructions, and log wording.
+  `hooks/register.ts` and `tests/register.test.ts` are adapted from it.
+- [ruihe774/cc-micro-compaction](https://github.com/ruihe774/cc-micro-compaction) (Unlicense)
+  provides the original `microCompact` behavior for replacing `Read` results and dropping thinking.
+  `hooks/mask.ts` and `tests/mask.test.ts` are derived from it.
+
+This mod extends `microCompact`. It masks every common tool, not only `Read`. It keeps the 5 newest
+covered tool uses whole. It keeps the head and tail of command output and the start of errors. Its
+placeholders list file paths from removed text.
 
 ## Develop
 
 ```sh
-claude plugin validate .        # what the module hooks and calls
-claude plugin test .            # tests: mocked clock, usage, /compact and summary
-npx -p typescript tsc -p .      # type-check, once Claude Code has written .claude-plugin/types/
+claude plugin validate .        # show what the mod hooks and calls
+claude plugin test .            # run the mocked clock, usage, compaction, and summary tests
+npx -p typescript tsc -p .      # type-check after Claude Code writes the generated types
 ```
 
-Claude Code writes `.claude-plugin/types/` (gitignored) the first time it loads the mod from this
-folder. The root `tsconfig.json` extends the `tsconfig.json` in there.
+Claude Code writes `.claude-plugin/types/` the first time it loads the mod from this folder. The
+directory is ignored by Git. The root `tsconfig.json` extends the generated `tsconfig.json` there.
 
-To try it by hand, open a throwaway session in a new tmux window. Inside tmux the window opens in
-the current session; outside, in a detached session named `idle-micro`.
+Use `scripts/try-in-tmux` to open a throwaway Claude Code session in a new tmux window:
 
 ```sh
-scripts/try-in-tmux micro      # masking the reads is enough: look for `micro-compacted at`
-scripts/try-in-tmux summary    # the target is 1 token, so it writes the summary: `compacted at`
+scripts/try-in-tmux micro      # expect `micro-compacted at`
+scripts/try-in-tmux summary    # expect `compacted at` without the `micro-` prefix
 ```
 
-The script writes three large text files and five one-line notes to
-`${TMPDIR:-/tmp}/idle-micro-compact-try/` and starts
-Claude Code there on Haiku with this folder's mod loaded, a one-minute idle delay and a 100-token
-floor. It prints the prompt to paste and the line to look for. With `--drive` it also accepts the
-folder-trust question, sends the prompt, waits for the idle compaction's line, and exits 0 when it
-is the expected branch. The window stays open either way.
+Inside tmux, the script opens the window in the current session. Outside tmux, it uses a detached
+session named `idle-micro`. It writes three large files and five one-line notes to
+`${TMPDIR:-/tmp}/idle-micro-compact-try/`, then starts Claude Code there on Haiku with the mod loaded,
+a one-minute idle delay, and a 100-token floor. It prints the prompt to paste and the expected line.
+
+Pass `--drive` to accept the fixture folder's trust prompt, send the test prompt, wait for the idle
+compaction line, and exit successfully only when the expected branch appears. The tmux window stays
+open.
 
 ## License
 
