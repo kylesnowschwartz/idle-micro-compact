@@ -20,11 +20,15 @@ const CHAT: SessionMessage[] = [
   { role: 'assistant', text: 'hi', toolUses: [], handle: 'a0' },
 ]
 
-/** One long Read: eliding it takes out nearly all the text. */
+/** One long Read and five short calls since: masking the Read takes out nearly all the text. */
 const READ: SessionMessage[] = [
   { role: 'user', text: 'read a.ts', toolUses: [], handle: 'u0' },
   { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r1', tool: 'Read', input: { file_path: '/src/a.ts' } }], handle: 'a1' },
   { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r1', text: numbered(1, 2000), isError: false }], handle: 'u1' },
+  ...[1, 2, 3, 4, 5].flatMap((i): SessionMessage[] => [
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: `b${i}`, tool: 'Bash', input: { command: `echo ${i}` } }], handle: `ba${i}` },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: `b${i}`, text: `${i}`, isError: false }], handle: `bu${i}` },
+  ]),
   { role: 'assistant', text: 'done', toolUses: [], handle: 'a2' },
 ]
 
@@ -228,7 +232,7 @@ describe('reloading', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
-    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (nothing to elide; 200k tokens → 12k summary, measured 15k)'])
+    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k)'])
   })
 
   test('a freshly loaded module re-arms from the stored turn', async ($, on) => {
@@ -239,7 +243,7 @@ describe('reloading', () => {
     await clock.advance(2)
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
-    expect(seen.logs).toEqual(['compacted at 18:20 after 50 min idle (nothing to elide; 200k tokens → 12k summary, measured 15k)'])
+    expect(seen.logs).toEqual(['compacted at 18:20 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k)'])
   })
 
   test('a reload past the deadline does nothing and says nothing', async ($, on) => {
@@ -374,7 +378,7 @@ describe('when it fires', () => {
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    const line = 'compacted at 18:50 after 50 min idle (nothing to elide; 200k tokens → 12k summary, measured 15k)'
+    const line = 'compacted at 18:50 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k)'
     expect(seen.logs).toEqual([line])
     expect(seen.status).toEqual([line])
     await turnStart($)
@@ -387,7 +391,7 @@ describe('when it fires', () => {
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (nothing to elide; 200k tokens → 12k summary, measured 15k, 99% read from cache)'])
+    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k, 99% read from cache)'])
   })
 
   test('a timer that fires late, after the machine slept, does not compact and says why', async ($, on) => {
@@ -483,7 +487,7 @@ describe('when it fires', () => {
 })
 
 describe('choosing the branch', () => {
-  test('elides the reads with no model call when that lands under the target', async ($, on) => {
+  test('masks old tool results with no model call when that lands under the target', async ($, on) => {
     const { clock, seen } = setup($, on, { tokens: 140_000, transcript: READ })
     await turnDone($)
     await clock.advance(50 * MIN + 1)
@@ -491,12 +495,12 @@ describe('choosing the branch', () => {
     expect(seen.commands.length).toBe(1)
     expect(seen.compacts).toEqual([])
     expect(seen.logs).toEqual([
-      'micro-compacted at 18:50 after 50 min idle (120k conversation → est. 112k, measured 15k; 1 read and 0 thinking blocks elided, no model call)',
+      'micro-compacted at 18:50 after 50 min idle (120k conversation → est. 112k, measured 15k; 1 tool result masked, 0 trimmed to head and tail, 0 thinking blocks dropped, no model call)',
     ])
     expect(seen.status).toEqual(seen.logs)
   })
 
-  test('writes the summary when the elided transcript would still be over the target', { options: { microTargetTokens: 100 } }, async ($, on) => {
+  test('writes the summary when the masked transcript would still be over the target', { options: { microTargetTokens: 100 } }, async ($, on) => {
     const { clock, seen } = setup($, on, { transcript: READ })
     await turnDone($)
     await clock.advance(50 * MIN + 1)

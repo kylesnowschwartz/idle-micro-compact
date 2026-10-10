@@ -54,7 +54,7 @@ SOFTWARE.
 
 ================================================================================
 
-hooks/elide.ts and tests/elide.test.ts are copied from ruihe774/cc-micro-compaction
+hooks/mask.ts and tests/mask.test.ts are derived from ruihe774/cc-micro-compaction
 (https://github.com/ruihe774/cc-micro-compaction), released into the public domain under
 the Unlicense:
 

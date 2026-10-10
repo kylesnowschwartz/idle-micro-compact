@@ -1,7 +1,7 @@
 {
   "name": "idle-micro-compact",
-  "version": "0.1.0",
-  "description": "Compacts an idle session before its prompt cache expires: first by eliding file reads and thinking with no model call, falling back to a summary when that would not shrink it enough.",
+  "version": "0.2.0",
+  "description": "Compacts an idle session before its prompt cache expires: first by masking old tool results and dropping thinking with no model call, falling back to a summary when that would not shrink it enough.",
   "author": {
     "name": "Kyle Schwartz"
   },
@@ -32,7 +32,7 @@
     "microTargetTokens": {
       "type": "number",
       "title": "Micro-compaction target",
-      "description": "Elide file reads and thinking, with no model call, when that is estimated to leave the conversation at or under this many tokens. Above it, write a summary instead.",
+      "description": "Mask old tool results and drop thinking, with no model call, when that is estimated to leave the conversation at or under this many tokens. Above it, write a summary instead.",
       "default": 150000,
       "min": 0
     }

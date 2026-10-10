@@ -1,0 +1,20 @@
+{
+  "name": "idle-micro-compact",
+  "owner": {
+    "name": "kylesnowschwartz",
+    "url": "https://github.com/kylesnowschwartz"
+  },
+  "metadata": {
+    "description": "Marketplace for the idle-micro-compact mod.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "idle-micro-compact",
+      "source": "./",
+      "description": "Compacts an idle session before its prompt cache expires, with no model call when that is enough.",
+      "version": "0.2.0",
+      "license": "MIT"
+    }
+  ]
+}

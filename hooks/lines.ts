@@ -1,6 +1,6 @@
 import type { ModelUsage, SessionCompactResult, SessionCompacted } from 'claude-code'
 import type { Branch } from './decide.ts'
-import type { MicroCompactStats } from './elide.ts'
+import type { MaskStats } from './mask.ts'
 
 /** What the session.compact hook decided, for the line the timer writes once the compaction stands. */
 export type Outcome = {
@@ -8,7 +8,7 @@ export type Outcome = {
   // the conversation (the Messages row) just before the compaction
   conversationTokens: number
   estimate: number
-  stats: MicroCompactStats
+  stats: MaskStats
   // core's answer on the summary branch
   summary?: SessionCompactResult
 }
@@ -32,7 +32,7 @@ function cacheShare(usage: ModelUsage | undefined) {
 /** Why micro-compaction wasn't enough, as the summary line opens with it; empty when the hook never decided. */
 function whyNotMicro(outcome: Outcome | undefined, targetTokens: number) {
   if (outcome?.branch.kind !== 'summary') return ''
-  if (outcome.branch.reason === 'nothing-to-elide') return 'nothing to elide; '
+  if (outcome.branch.reason === 'nothing-to-mask') return 'nothing to mask; '
   return `micro est. ${inThousands(outcome.estimate)}, over the ${approx(targetTokens)} target; `
 }
 
@@ -45,8 +45,14 @@ type MicroLineInput = {
 
 /** The micro branch: the conversation before, the estimate after, and what was taken out. */
 export function microLine({ when: { at, idleMin }, outcome, measuredAfter }: MicroLineInput) {
-  const { elided, thinkingDropped } = outcome.stats
-  const removed = `${plural(elided, 'read', 'reads')} and ${plural(thinkingDropped, 'thinking block', 'thinking blocks')} elided`
+  const { masked, trimmedToHeadAndTail, errorsCutToStart, thinkingDropped } = outcome.stats
+  const removed = [
+    plural(masked, 'tool result masked', 'tool results masked'),
+    `${trimmedToHeadAndTail} trimmed to head and tail`,
+    // Rare enough to leave out when there are none.
+    ...(errorsCutToStart ? [plural(errorsCutToStart, 'error cut to its start', 'errors cut to their start')] : []),
+    plural(thinkingDropped, 'thinking block dropped', 'thinking blocks dropped'),
+  ].join(', ')
   const sizes = `${inThousands(outcome.conversationTokens)} conversation → est. ${inThousands(outcome.estimate)}, ${measured(measuredAfter)}`
   return `micro-compacted at ${at} after ${idleMin} min idle (${sizes}; ${removed}, no model call)`
 }

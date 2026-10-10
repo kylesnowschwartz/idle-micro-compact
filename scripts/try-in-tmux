@@ -16,7 +16,9 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 FIXTURES="${TMPDIR:-/tmp}"
 FIXTURES="${FIXTURES%/}/idle-micro-compact-try"
 DETACHED_SESSION=idle-micro
-PROMPT='Use the Read tool to read api-part1.ts, then api-part2.ts, then reference.md in this folder, each in one call with no offset or limit. Then reply with one sentence naming the three files. Do nothing else.'
+# The five short notes come last so the three large reads fall outside the five newest tool uses,
+# whose results micro-compaction keeps whole.
+PROMPT='Use the Read tool to read api-part1.ts, then api-part2.ts, then reference.md, then note1.md, note2.md, note3.md, note4.md and note5.md in this folder, each in its own call with no offset or limit. Then reply with one sentence naming the three large files. Do nothing else.'
 
 mode=micro
 drive=false
@@ -29,7 +31,7 @@ for arg in "$@"; do
   esac
 done
 
-# The micro branch needs a target the elided transcript always lands under; the summary branch one
+# The micro branch needs a target the masked transcript always lands under; the summary branch one
 # it never does.
 if [[ $mode == micro ]]; then
   target_tokens=1000000
@@ -40,7 +42,8 @@ else
 fi
 window="idle-micro-$mode"
 
-# About 70 KB each of plain, repetitive text: big enough that eliding the reads is worth it.
+# About 70 KB each of plain, repetitive text: big enough that masking the reads is worth it. And
+# five one-line notes.
 write_fixtures() {
   mkdir -p "$FIXTURES"
   [[ -f $FIXTURES/api-part1.ts ]] ||
@@ -49,6 +52,10 @@ write_fixtures() {
     seq 1001 2000 | awk '{ printf "export const setting%04d = { name: \"setting-%04d\", enabled: true }\n", $1, $1 }' >"$FIXTURES/api-part2.ts"
   [[ -f $FIXTURES/reference.md ]] ||
     seq 1 1300 | awk '{ printf "- Entry %04d: setting-%04d is read by handler%04d at startup.\n", $1, $1, $1 }' >"$FIXTURES/reference.md"
+  local i
+  for i in 1 2 3 4 5; do
+    [[ -f $FIXTURES/note$i.md ]] || echo "Note $i." >"$FIXTURES/note$i.md"
+  done
 }
 
 claude_command() {

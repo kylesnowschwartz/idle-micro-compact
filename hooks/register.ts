@@ -1,6 +1,6 @@
 import type { EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionContextUsage, Timer } from 'claude-code'
-import { chooseBranch, estimateAfter } from './decide.ts'
-import { microCompact } from './elide.ts'
+import { chooseBranch, estimateAfter, thinkingCharsIn } from './decide.ts'
+import { maskOldToolResults } from './mask.ts'
 import { type Outcome, type When, approx, microLine, summaryLine } from './lines.ts'
 
 const MINUTE_MS = 60_000
@@ -11,8 +11,8 @@ const MARGIN_MS = 10 * MINUTE_MS
 // Below this many conversation tokens a cold re-read is cheap; not worth losing detail. The system
 // prompt and tools don't count: compaction leaves them in place, and they are re-cached either way.
 const DEFAULT_MIN_TOKENS = 40_000
-// At or under this many conversation tokens after eliding reads, the elided transcript is small
-// enough to come back to, and no summary is written.
+// At or under this many conversation tokens after masking old tool results, the masked transcript
+// is small enough to come back to, and no summary is written.
 const DEFAULT_MICRO_TARGET_TOKENS = 150_000
 
 // How the instructions of this module's own /compact open. Its session.compact hook looks for this
@@ -31,7 +31,7 @@ type Settings = {
   idleMs: number
   // the conversation size below which compacting isn't worth it
   minTokens: number
-  // the conversation size at or under which eliding reads is enough
+  // the conversation size at or under which masking old tool results is enough
   microTargetTokens: number
 }
 
@@ -141,6 +141,40 @@ async function measureAfter($: EngineInterface) {
   }
 }
 
+/**
+ * The thinking the conversation sends back, in characters. 0 when the API view can't be read: the
+ * estimate then leaves the thinking in, erring high, toward the summary.
+ */
+async function sentBackThinkingChars($: EngineInterface) {
+  try {
+    return thinkingCharsIn(await $.session.messages({ as: 'api' }))
+  } catch {
+    return 0
+  }
+}
+
+type Compaction = { e: SessionCompactInput; next: Next<'session.compact'>; conversationTokens: number; state: State; settings: Settings }
+
+/**
+ * Masks when that is estimated to land under the target, answering with no model call; hands the
+ * call down to core's summary otherwise. `conversationTokens` is the Messages row just before the
+ * call: the event carries the transcript but not its size.
+ */
+async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens, state, settings }: Compaction) {
+  const { messages, stats } = maskOldToolResults(e.messages)
+  // Dropping the thinking-only messages drops all the thinking the API view holds; with none dropped, none counts.
+  const droppedThinkingChars = stats.thinkingDropped ? await sentBackThinkingChars($) : 0
+  const estimate = estimateAfter({ conversationTokens, original: e.messages, compacted: messages, droppedThinkingChars })
+  const branch = chooseBranch(estimate, settings.microTargetTokens, stats)
+  if (branch.kind === 'micro') {
+    state.outcome = { branch, conversationTokens, estimate, stats }
+    return { messages, tokensBefore: conversationTokens, tokensAfter: estimate }
+  }
+  const summary = await next(e)
+  state.outcome = { branch, conversationTokens, estimate, stats, summary }
+  return summary
+}
+
 /** Runs /compact with the measured size held for the session.compact hook, and returns what the hook decided. */
 async function runIdleCompaction($: EngineInterface, state: State, conversationTokens: number, when: When) {
   state.pending = { conversationTokens }
@@ -244,9 +278,9 @@ async function rearm($: EngineInterface, state: State, settings: Settings) {
 /**
  * Arms a timer at the end of every main-loop turn and cancels it when the next turn starts, so it
  * runs from the last model request: the last time the cache was refreshed. When it fires on time
- * and the conversation is over the floor, it compacts while the cache is still warm: by eliding
- * Read results and thinking when that is estimated to leave the conversation under the target,
- * with no model call, and by the model's summary otherwise. Either way it leaves a note in the
+ * and the conversation is over the floor, it compacts while the cache is still warm: by masking
+ * old tool results and dropping thinking when that is estimated to leave the conversation under
+ * the target, with no model call, and by the model's summary otherwise. Either way it leaves a note in the
  * transcript and the status line. The time of the last turn is kept in `$.state`, so a reload of
  * the module, which cancels the timer, re-arms it for the time left.
  */
@@ -255,24 +289,6 @@ export const register: Register = (on, options) => {
   // A reloaded module can't tell whether the one before it pinned a status: assume it did.
   const state: State = { generation: 0, hasStatus: true }
 
-  /**
-   * Elides when that is estimated to land under the target, answering with no model call; hands the
-   * call down to core's summary otherwise. `conversationTokens` is the Messages row just before the
-   * call: the event carries the transcript but not its size.
-   */
-  async function elideOrSummarize(e: SessionCompactInput, conversationTokens: number, next: Next<'session.compact'>) {
-    const { messages, stats } = microCompact(e.messages)
-    const estimate = estimateAfter(conversationTokens, e.messages, messages)
-    const branch = chooseBranch(estimate, settings.microTargetTokens, stats)
-    if (branch.kind === 'micro') {
-      state.outcome = { branch, conversationTokens, estimate, stats }
-      return { messages, tokensBefore: conversationTokens, tokensAfter: estimate }
-    }
-    const summary = await next(e)
-    state.outcome = { branch, conversationTokens, estimate, stats, summary }
-    return summary
-  }
-
   // Only this module's idle compaction, which arrives as a /compact with its instructions: the
   // person's own /compact, auto-compaction, a subagent's and other plugins' calls go on untouched.
   on('session.compact', { trigger: 'manual' }, async ($, e, next) => {
@@ -280,7 +296,7 @@ export const register: Register = (on, options) => {
     // Raised by someone other than this module's timer, which measured nothing: measure now.
     const conversationTokens =
       state.pending?.conversationTokens ?? conversationTokensOf((await $.session.usage({ breakdown: 'full' })).context)
-    return conversationTokens === undefined ? next(e) : elideOrSummarize(e, conversationTokens, next)
+    return conversationTokens === undefined ? next(e) : maskOrSummarize($, { e, next, conversationTokens, state, settings })
   }).catch(($, e, next) => {
     // A throw before deciding still leaves a compaction: core's summary, with the same instructions.
     return next(e)
