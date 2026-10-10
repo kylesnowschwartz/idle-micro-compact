@@ -28,7 +28,9 @@ const CHARS_PER_TOKEN = 4
  * the summary branch. No token-count request: the timer fires with minutes to spare, not hours.
  */
 export function estimateAfter(conversationTokens: number, original: readonly SessionMessage[], trimmed: readonly SessionMessage[]) {
-  const removedTokens = (readableChars(original) - readableChars(trimmed)) / CHARS_PER_TOKEN
+  // An elided image or PDF swaps empty text for a longer placeholder: that removes nothing countable.
+  const removedChars = Math.max(0, readableChars(original) - readableChars(trimmed))
+  const removedTokens = removedChars / CHARS_PER_TOKEN
   return Math.max(0, Math.round(conversationTokens - removedTokens))
 }
 

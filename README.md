@@ -21,27 +21,30 @@ exit cancels it; a reload re-arms it for the time left. When the timer fires:
 
 1. If the conversation (the Messages row of `/context`) is under `minTokens` (default 40000), it does
    nothing and says so: `not compacted: the conversation is 12k tokens, under the 40k floor`.
-2. If the timer fired more than 10 minutes late (the machine slept), the cache is already cold. It
-   does nothing and says so.
+2. If the timer fired more than an hour after the last turn (the machine slept), the 1-hour cache has
+   already lapsed. It does nothing and says so. An `idleMinutes` of 60 or more leaves no warm window.
 3. Otherwise it runs `/compact` with idle-compact's summary instructions. Its own `session.compact`
    hook picks that compaction out by the instructions' opening words, runs `microCompact` over the
-   transcript, and estimates the size afterwards as the Messages row before, scaled by how much text
-   is left.
+   transcript, and estimates the size afterwards as the Messages row before, less the removed text
+   at about 4 characters a token.
    - At or under `microTargetTokens` (default 150000), it installs the elided transcript itself. No
      summary request is made.
    - Over the target, or when there was nothing to elide, it hands the compaction to Claude Code's
      own summary.
 
-Either way it leaves one line in the transcript and the status line:
+Either way it leaves one line in the transcript and the status line. For example:
 
 ```
-● idle-micro-compact: micro-compacted at 14:38 after 1 min idle (73k conversation → est. 1k, measured 7k; 3 reads and 3 thinking blocks elided, no model call)
-● idle-micro-compact: compacted at 14:40 after 1 min idle (micro est. 1k, over the 1 target; 88k tokens → 10k summary, measured 14k, 48% read from cache)
+● idle-micro-compact: micro-compacted at 14:38 after 1 min idle (73k conversation → est. 66k, measured 64k; 3 reads and 3 thinking blocks elided, no model call)
+● idle-micro-compact: compacted at 14:40 after 1 min idle (micro est. 81k, over the 1 target; 88k tokens → 10k summary, measured 14k, 48% read from cache)
 ```
 
 `est.` is the estimate the decision used. `measured` is the Messages row `/context` reports straight
 after the compaction. On the summary line, the first figure is the whole context before and the second
 is the summary alone, as idle-compact reports them.
+
+If the idle compaction fails, it logs one line with the reason, `not compacted: <reason>`, and sets
+no status. The next turn arms the timer again.
 
 It goes through `/compact` rather than `$.session.compact` because Claude Code does not run a plugin's
 own hooks on an event that plugin's code raised outside a hook, such as from a timer. Through the
@@ -50,11 +53,10 @@ as a manual `/compact`, and the `/compact …` line shows in the transcript.
 
 ## Caveats
 
-- **The estimate runs low.** It counts only the text `$.session.messages()` shows: message text,
-  tool inputs and tool results. Attachments such as loaded instruction files and reminders are not in
-  that text, so they stay after eliding but are left out of the ratio. On a small conversation the
-  measured size can be several times the estimate. On a large, read-heavy one the gap is a smaller
-  share.
+- **The estimate errs high.** It subtracts only the text `$.session.messages()` shows as removed:
+  message text, tool inputs and tool results. Context with no text there, such as loaded instruction
+  files and reminders, stays in the figure, as it stays after eliding. Images and thinking have no
+  text there either, so the estimate misses what dropping them saves, and leans toward the summary.
 - **Micro-compaction rewrites the transcript from the first elided read on.** The next request
   re-caches from that point. That is cheaper than re-caching the whole conversation cold, but it is
   not free.
@@ -89,6 +91,8 @@ options from `idle-micro-compact@inline`):
 claude --plugin-dir . --model haiku --settings \
   '{"pluginConfigs":{"idle-micro-compact@inline":{"options":{"idleMinutes":1,"minTokens":100,"microTargetTokens":1000000}}}}'
 ```
+
+From inside another Claude Code session, put `env -u CLAUDECODE` in front of `claude`.
 
 Have it read a few large files, wait a minute after the turn ends, and look for the
 `micro-compacted at` line. Set `microTargetTokens` to `1` to see the summary branch instead.

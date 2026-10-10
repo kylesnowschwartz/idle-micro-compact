@@ -63,15 +63,20 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
   const clock = mock.clock(on, { now: T0 })
   // lateMs: how late the timer fires, as after the machine slept. The module reads the usage
   // before the time, so the usage hook is where the clock runs on.
+  // duringUsage: run once while the module reads the usage, to overtake the timer.
   // duringRead: run once while the module reads `$.state`, to overtake a re-arm.
   // duringWrite: run once before a write to `$.state` lands, to overtake an arm.
   const seen = {
     compacts: [] as string[], commands: [] as string[], logs: [] as string[], status: [] as (string | undefined)[], lateMs: 0, isCompacted: false,
     stored, duringRead: undefined as (() => Promise<unknown>) | undefined,
+    duringUsage: undefined as (() => Promise<unknown>) | undefined,
     duringWrite: undefined as (() => Promise<unknown>) | undefined,
   }
   on('session.usage', async (_$, e) => {
     if (seen.lateMs) await clock.advance(seen.lateMs)
+    const during = seen.duringUsage
+    seen.duringUsage = undefined
+    if (during) await during()
     if (seen.isCompacted) {
       const context = { tokens: undefined, window: 1_000_000 }
       return { value: { startedAt: 0, context: e.breakdown ? { ...context, breakdown: breakdown(null, after) } : context, rateLimits: [] } }
@@ -81,7 +86,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
     return { value: { startedAt: 0, context: withBreakdown, rateLimits: [] } }
   })
   on('command.run', { command: 'compact' }, async (_$, e) => {
-    if (compact === 'throw') throw new Error('a turn is running')
+    if (compact === 'throw') throw new Error('refused')
     seen.commands.push(e.args)
     const result = await (engine as any).session.compact({ trigger: 'manual', instructions: e.args, messages: transcript })
     if (result.messages) seen.isCompacted = true
@@ -394,6 +399,27 @@ describe('when it fires', () => {
     expect(seen.compacts).toEqual([])
     expect(seen.logs).toEqual(['not compacted: the timer fired 530 min after the last turn, too late for a warm cache'])
     expect(seen.status).toEqual([])
+  })
+
+  test('an idle delay that reaches the cache lifetime does not compact', { options: { idleMinutes: 60 } }, async ($, on) => {
+    const { clock, seen } = setup($, on)
+    await turnDone($)
+    seen.lateMs = 1
+    await clock.advance(60 * MIN)
+    await clock.settle()
+    expect(seen.compacts).toEqual([])
+    expect(seen.logs).toEqual(['not compacted: the timer fired 60 min after the last turn, too late for a warm cache'])
+  })
+
+  test('a turn that starts while the timer measures stops the compaction, without a word', async ($, on) => {
+    const { clock, seen } = setup($, on)
+    await turnDone($)
+    seen.duringUsage = () => turnStart($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.commands).toEqual([])
+    expect(seen.compacts).toEqual([])
+    expect(seen.logs).toEqual([])
   })
 
   test('a timer a few minutes late still compacts', async ($, on) => {

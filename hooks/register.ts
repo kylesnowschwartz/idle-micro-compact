@@ -3,10 +3,11 @@ import { chooseBranch, estimateAfter } from './decide.ts'
 import { microCompact } from './elide.ts'
 import { type Outcome, type When, approx, microLine, summaryLine } from './lines.ts'
 
-// How long before the 1-hour cache lapses the timer compacts, leaving a summary pass time to
-// finish. Also how late the timer may fire and still find the cache warm.
-const MARGIN_MS = 10 * 60_000
-const HOUR_MS = 60 * 60_000
+const MINUTE_MS = 60_000
+// The prompt cache's lifetime from the last request; past it the cache is cold.
+const HOUR_MS = 60 * MINUTE_MS
+// The default lead before the cache lapses, leaving a summary pass time to finish.
+const MARGIN_MS = 10 * MINUTE_MS
 // Below this many conversation tokens a cold re-read is cheap; not worth losing detail. The system
 // prompt and tools don't count: compaction leaves them in place, and they are re-cached either way.
 const DEFAULT_MIN_TOKENS = 40_000
@@ -65,7 +66,7 @@ function nonNegative(raw: unknown): number | undefined {
 function readSettings(options: PluginOptions): Settings {
   const idleMinutes = nonNegative(options.idleMinutes)
   return {
-    idleMs: idleMinutes ? idleMinutes * 60_000 : HOUR_MS - MARGIN_MS,
+    idleMs: idleMinutes ? idleMinutes * MINUTE_MS : HOUR_MS - MARGIN_MS,
     minTokens: nonNegative(options.minTokens) ?? DEFAULT_MIN_TOKENS,
     microTargetTokens: nonNegative(options.microTargetTokens) ?? DEFAULT_MICRO_TARGET_TOKENS,
   }
@@ -183,13 +184,15 @@ async function compactIfWorthIt($: EngineInterface, state: State, { idle, settin
       return
     }
     const now = await $.clock.now()
-    const when: When = { at: hhmm(now), idleMin: Math.round((now - idle.since) / 60_000) }
+    const when: When = { at: hhmm(now), idleMin: Math.round((now - idle.since) / MINUTE_MS) }
     // A timer that fires late (the machine slept) finds the cache cold: compacting now would cost
     // what the cold return costs, and lose detail on top.
     if (now > idle.latest) {
       $.ui.log(`not compacted: the timer fired ${when.idleMin} min after the last turn, too late for a warm cache`)
       return
     }
+    // A turn that started while the timer measured means the person is back: leave the conversation be.
+    if (isOvertaken()) return
     const outcome = await runIdleCompaction($, state, conversationTokens, when)
     if (outcome === undefined) {
       $.ui.log(`not compacted by this mod at ${when.at}: /compact ran, but its session.compact hook never saw it`)
@@ -204,7 +207,7 @@ async function compactIfWorthIt($: EngineInterface, state: State, { idle, settin
 
 /** Starts the timer, due in `dueInMs`. The idle time counts from `idleSince`. */
 function schedule($: EngineInterface, state: State, settings: Settings, { idleSince, dueInMs }: { idleSince: number; dueInMs: number }) {
-  const idle: IdleWindow = { since: idleSince, latest: idleSince + settings.idleMs + MARGIN_MS }
+  const idle: IdleWindow = { since: idleSince, latest: idleSince + HOUR_MS }
   state.timer = $.clock.after(dueInMs, () => {
     state.timer = undefined
     void compactIfWorthIt($, state, { idle, settings })

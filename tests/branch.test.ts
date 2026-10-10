@@ -129,6 +129,19 @@ describe('the estimate', () => {
     expect(estimateAfter(90_200, original, trimmed)).toBe(89_975)
   })
 
+  test('an elided image, empty text swapped for a placeholder, keeps the measured size', () => {
+    const original: SessionMessage[] = [
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'i', tool: 'Read', input: { file_path: '/w/img.png' } }] },
+      {
+        role: 'user', text: '', toolUses: [],
+        toolResults: [{ tool_use_id: 'i', text: '', isError: false, result: { type: 'image', file: { dimensions: { originalWidth: 256, originalHeight: 256 } } } }],
+      },
+    ]
+    const { messages: trimmed, stats } = microCompact(original)
+    expect(stats.elided).toBe(1)
+    expect(estimateAfter(50_000, original, trimmed)).toBe(50_000)
+  })
+
   test('an empty transcript keeps the measured size', () => {
     expect(estimateAfter(5_000, [], [])).toBe(5_000)
   })
