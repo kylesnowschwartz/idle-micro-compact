@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Opens a tmux window with a throwaway Claude Code session that loads this repo's mod, set up to show
+# the micro branch or the summary branch of an idle compaction one minute after a turn.
+set -euo pipefail
+
+usage() {
+  echo "usage: scripts/try-in-tmux [micro|summary] [--drive]" >&2
+}
+
+die() {
+  echo "try-in-tmux: $*" >&2
+  exit 1
+}
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+FIXTURES="${TMPDIR:-/tmp}"
+FIXTURES="${FIXTURES%/}/idle-micro-compact-try"
+DETACHED_SESSION=idle-micro
+PROMPT='Use the Read tool to read api-part1.ts, then api-part2.ts, then reference.md in this folder, each in one call with no offset or limit. Then reply with one sentence naming the three files. Do nothing else.'
+
+mode=micro
+drive=false
+for arg in "$@"; do
+  case "$arg" in
+    micro | summary) mode=$arg ;;
+    --drive) drive=true ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage; die "unknown argument: $arg" ;;
+  esac
+done
+
+# The micro branch needs a target the elided transcript always lands under; the summary branch one
+# it never does.
+if [[ $mode == micro ]]; then
+  target_tokens=1000000
+  expected='micro-compacted at'
+else
+  target_tokens=1
+  expected='compacted at'
+fi
+window="idle-micro-$mode"
+
+# About 70 KB each of plain, repetitive text: big enough that eliding the reads is worth it.
+write_fixtures() {
+  mkdir -p "$FIXTURES"
+  [[ -f $FIXTURES/api-part1.ts ]] ||
+    seq 1 1000 | awk '{ printf "export function handler%04d(input: string): string { return input + \"-%04d\" }\n", $1, $1 }' >"$FIXTURES/api-part1.ts"
+  [[ -f $FIXTURES/api-part2.ts ]] ||
+    seq 1001 2000 | awk '{ printf "export const setting%04d = { name: \"setting-%04d\", enabled: true }\n", $1, $1 }' >"$FIXTURES/api-part2.ts"
+  [[ -f $FIXTURES/reference.md ]] ||
+    seq 1 1300 | awk '{ printf "- Entry %04d: setting-%04d is read by handler%04d at startup.\n", $1, $1, $1 }' >"$FIXTURES/reference.md"
+}
+
+claude_command() {
+  local settings
+  settings=$(printf '{"pluginConfigs":{"idle-micro-compact@inline":{"options":{"idleMinutes":1,"minTokens":100,"microTargetTokens":%d}}}}' "$target_tokens")
+  printf 'env -u CLAUDECODE claude --plugin-dir %q --model haiku --tools Read --strict-mcp-config --debug-file %q --settings %q' \
+    "$REPO_ROOT" "$FIXTURES/debug-$mode.log" "$settings"
+}
+
+# Prints the new window's target, session:index.
+open_window() {
+  local session command
+  command=$(claude_command)
+  if [[ -n ${TMUX:-} ]]; then
+    session=$(tmux display-message -p '#S')
+  else
+    session=$DETACHED_SESSION
+  fi
+  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+  if tmux has-session -t "=$session" 2>/dev/null; then
+    tmux new-window -d -P -F '#{session_name}:#{window_index}' -t "=$session:" -n "$window" -c "$FIXTURES" "$command"
+  else
+    tmux new-session -d -P -F '#{session_name}:#{window_index}' -s "$session" -n "$window" -c "$FIXTURES" "$command"
+  fi
+}
+
+pane() {
+  tmux capture-pane -t "$T" -p -S -120
+}
+
+# wait_for <seconds> <grep pattern>: polls the pane once a second until the pattern shows.
+wait_for() {
+  local seconds=$1 pattern=$2 i
+  for ((i = 0; i < seconds; i++)); do
+    pane | grep -Eq -- "$pattern" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+fail() {
+  echo "try-in-tmux: $*" >&2
+  echo "--- pane tail ---" >&2
+  pane | tail -40 >&2
+  echo "the window stays open: $T" >&2
+  exit 1
+}
+
+matches_branch() {
+  local line=$1
+  if [[ $mode == micro ]]; then
+    [[ $line == *'micro-compacted at'* ]]
+  else
+    [[ $line == *'compacted at'* && $line != *'micro-compacted at'* ]]
+  fi
+}
+
+# Claude Code asks once whether to trust a new folder. This one holds only the generated fixtures.
+accept_folder_trust() {
+  pane | grep -q 'Yes, I trust this folder' || return 0
+  tmux send-keys -t "$T" Down
+  sleep 1
+  tmux send-keys -t "$T" Enter
+}
+
+drive() {
+  wait_for 30 '^❯|Yes, I trust this folder' || fail 'the session never started (no prompt or trust question within 30 s)'
+  accept_folder_trust
+  wait_for 30 '^❯' || fail 'the prompt never became ready (no line starting with ❯ within 30 s)'
+  tmux send-keys -t "$T" -l "$PROMPT"
+  sleep 1
+  tmux send-keys -t "$T" Enter
+  wait_for 120 ' for [0-9]*s · done' || fail 'the turn did not finish within 120 s'
+  wait_for 180 'idle-micro-compact:' || fail 'no idle-micro-compact line within 180 s of the turn'
+
+  local line
+  line=$(pane | grep 'idle-micro-compact:' | tail -1)
+  echo "$line"
+  echo "--- pane tail ---"
+  pane | tail -40
+  echo "the window stays open: $T"
+  matches_branch "$line" || die "the line is not the $mode branch (expected \"$expected\")"
+}
+
+command -v tmux >/dev/null || die 'tmux is not installed'
+command -v claude >/dev/null || die 'claude is not on PATH'
+
+write_fixtures
+T=$(open_window)
+
+if [[ $drive == false ]]; then
+  echo "tmux target: $T"
+  echo "fixtures:    $FIXTURES"
+  echo
+  echo "On the first run, Claude Code asks whether to trust the fixtures folder: choose yes."
+  echo "Paste this prompt once the session is ready:"
+  echo "  $PROMPT"
+  echo
+  echo "About a minute after the turn ends, look for a line containing \"idle-micro-compact: $expected\"."
+  [[ $mode == summary ]] && echo "(without the micro- prefix)"
+  exit 0
+fi
+
+drive

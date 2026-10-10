@@ -84,18 +84,19 @@ npx -p typescript tsc -p .      # type-check, once Claude Code has written .clau
 Claude Code writes `.claude-plugin/types/` (gitignored) the first time it loads the mod from this
 folder. The root `tsconfig.json` extends the `tsconfig.json` in there.
 
-To try it by hand in a throwaway session with a one-minute delay (a `--plugin-dir` copy takes its
-options from `idle-micro-compact@inline`):
+To try it by hand, open a throwaway session in a new tmux window. Inside tmux the window opens in
+the current session; outside, in a detached session named `idle-micro`.
 
 ```sh
-claude --plugin-dir . --model haiku --settings \
-  '{"pluginConfigs":{"idle-micro-compact@inline":{"options":{"idleMinutes":1,"minTokens":100,"microTargetTokens":1000000}}}}'
+scripts/try-in-tmux micro      # eliding the reads is enough: look for `micro-compacted at`
+scripts/try-in-tmux summary    # the target is 1 token, so it writes the summary: `compacted at`
 ```
 
-From inside another Claude Code session, put `env -u CLAUDECODE` in front of `claude`.
-
-Have it read a few large files, wait a minute after the turn ends, and look for the
-`micro-compacted at` line. Set `microTargetTokens` to `1` to see the summary branch instead.
+The script writes three large text files to `${TMPDIR:-/tmp}/idle-micro-compact-try/` and starts
+Claude Code there on Haiku with this folder's mod loaded, a one-minute idle delay and a 100-token
+floor. It prints the prompt to paste and the line to look for. With `--drive` it also accepts the
+folder-trust question, sends the prompt, waits for the idle compaction's line, and exits 0 when it
+is the expected branch. The window stays open either way.
 
 ## License
 
