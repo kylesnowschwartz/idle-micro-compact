@@ -107,10 +107,15 @@ describe('the session.compact hook', () => {
 })
 
 describe('the estimate', () => {
-  test('scales the measured size by the text left', () => {
+  test('takes the removed text off the measured size, at 4 characters a token', () => {
     const original: SessionMessage[] = [{ role: 'user', text: 'x'.repeat(1000), toolUses: [] }]
-    const trimmed: SessionMessage[] = [{ role: 'user', text: 'x'.repeat(250), toolUses: [] }]
-    expect(estimateAfter(80_000, original, trimmed)).toBe(20_000)
+    const trimmed: SessionMessage[] = [{ role: 'user', text: 'x'.repeat(200), toolUses: [] }]
+    expect(estimateAfter(80_000, original, trimmed)).toBe(79_800)
+  })
+
+  test('never goes below zero', () => {
+    const original: SessionMessage[] = [{ role: 'user', text: 'x'.repeat(1000), toolUses: [] }]
+    expect(estimateAfter(100, original, [])).toBe(0)
   })
 
   test("counts a Read's text once, though both its tool use and its result carry it", () => {
@@ -120,8 +125,8 @@ describe('the estimate', () => {
       { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r', text: body, isError: false }] },
     ]
     const trimmed: SessionMessage[] = [original[0]!, { ...original[1]!, toolResults: [{ tool_use_id: 'r', text: '', isError: false }] }]
-    // the tool use's input `{}` is the 2 characters left
-    expect(estimateAfter(90_200, original, trimmed)).toBe(200)
+    // 900 characters removed, 225 tokens; counted twice it would be 450
+    expect(estimateAfter(90_200, original, trimmed)).toBe(89_975)
   })
 
   test('an empty transcript keeps the measured size', () => {
@@ -150,23 +155,23 @@ describe('the line', () => {
   const when = { at: '18:50', idleMin: 50 }
 
   test('micro: sizes, what was elided, and no model call', () => {
-    const outcome = { branch: { kind: 'micro' } as const, before: 180_000, estimate: 61_400, stats: { elided: 12, chars: 400_000, thinkingDropped: 1 } }
-    expect(microLine(when, outcome, 58_000)).toBe(
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 180_000, estimate: 61_400, stats: { elided: 12, chars: 400_000, thinkingDropped: 1 } }
+    expect(microLine({ when, outcome, measuredAfter: 58_000 })).toBe(
       'micro-compacted at 18:50 after 50 min idle (180k conversation → est. 61k, measured 58k; 12 reads and 1 thinking block elided, no model call)',
     )
-    expect(microLine(when, outcome, undefined)).toContain('est. 61k, measured size unknown;')
+    expect(microLine({ when, outcome, measuredAfter: undefined })).toContain('est. 61k, measured size unknown;')
   })
 
   test('summary over the target says what micro-compaction would have left', () => {
-    const outcome = { branch: { kind: 'summary', reason: 'over-target' } as const, before: 300_000, estimate: 210_000, stats: { elided: 2, chars: 9_000, thinkingDropped: 0 } }
-    expect(summaryLine(when, outcome, { messages: [SUMMARY], tokensBefore: 320_000, tokensAfter: 12_000 }, 320_000, 14_000, 150_000)).toBe(
+    const outcome = { branch: { kind: 'summary', reason: 'over-target' } as const, conversationTokens: 300_000, estimate: 210_000, stats: { elided: 2, chars: 9_000, thinkingDropped: 0 } }
+    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensBefore: 320_000, tokensAfter: 12_000 }, contextTokens: 320_000, measuredAfter: 14_000, targetTokens: 150_000 })).toBe(
       'compacted at 18:50 after 50 min idle (micro est. 210k, over the 150k target; 320k tokens → 12k summary, measured 14k)',
     )
   })
 
   test('summary with nothing to elide says so', () => {
-    const outcome = { branch: { kind: 'summary', reason: 'nothing-to-elide' } as const, before: 60_000, estimate: 60_000, stats: { elided: 0, chars: 0, thinkingDropped: 0 } }
-    expect(summaryLine(when, outcome, { messages: [SUMMARY], tokensAfter: 5_000 }, 80_000, undefined, 150_000)).toBe(
+    const outcome = { branch: { kind: 'summary', reason: 'nothing-to-elide' } as const, conversationTokens: 60_000, estimate: 60_000, stats: { elided: 0, chars: 0, thinkingDropped: 0 } }
+    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensAfter: 5_000 }, contextTokens: 80_000, measuredAfter: undefined, targetTokens: 150_000 })).toBe(
       'compacted at 18:50 after 50 min idle (nothing to elide; 80k tokens → 5k summary, measured size unknown)',
     )
   })

@@ -1,10 +1,10 @@
 import type { EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionContextUsage, Timer } from 'claude-code'
 import { chooseBranch, estimateAfter } from './decide.ts'
 import { microCompact } from './elide.ts'
-import { type Outcome, approx, microLine, summaryLine } from './lines.ts'
+import { type Outcome, type When, approx, microLine, summaryLine } from './lines.ts'
 
-// How long before a 1-hour cache lapses to compact. A 367k-token summary pass took about 2 minutes.
-// Also how late the timer may fire and still compact.
+// How long before the 1-hour cache lapses the timer compacts, leaving a summary pass time to
+// finish. Also how late the timer may fire and still find the cache warm.
 const MARGIN_MS = 10 * 60_000
 const HOUR_MS = 60 * 60_000
 // Below this many conversation tokens a cold re-read is cheap; not worth losing detail. The system
@@ -14,59 +14,34 @@ const DEFAULT_MIN_TOKENS = 40_000
 // enough to come back to, and no summary is written.
 const DEFAULT_MICRO_TARGET_TOKENS = 150_000
 
-// How this module's own compaction's instructions open: its session.compact hook tells that call
-// from a /compact or another plugin's by it. The rest are the summary instructions, so a summary
-// written without the hook (skipped, or deciding against eliding) is told the same.
+// How the instructions of this module's own /compact open. Its session.compact hook looks for this
+// opening to tell its own call apart from a person's /compact or another plugin's. The rest of the
+// instructions guide the summary, so a summary written without the hook's help (the hook was
+// skipped, or chose the summary) gets the same guidance.
 const IDLE_OPENING = 'This idle compaction ran automatically at '
 
 // When a session's last main-loop turn ended (declared in types/index.d.ts). Held by the host for the
 // process, so it outlives a reload of this module.
 const LAST_TURN = { plugin: 'idle-micro-compact', key: 'lastTurn' } as const
 
-function nonNegative(raw: unknown): number | undefined {
-  if (raw === undefined || raw === '') return undefined
-  const n = Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : undefined
+/** The plugin options, read once: changing them reloads the module. */
+type Settings = {
+  // idle time before compacting
+  idleMs: number
+  // the conversation size below which compacting isn't worth it
+  minTokens: number
+  // the conversation size at or under which eliding reads is enough
+  microTargetTokens: number
 }
 
-const isIdleCompaction = (e: SessionCompactInput) => e.agentId === undefined && e.instructions?.startsWith(IDLE_OPENING) === true
+/** When the idle time began, and the last moment the cache is still warm enough to compact. */
+type IdleWindow = { since: number; latest: number }
 
-const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5)
-
-/**
- * What compaction can shrink: the conversation, as /context's Messages row counts it. The whole
- * context when there is no breakdown.
- *
- * The row is a residual: the last response's input less the other rows. That needs the `full`
- * breakdown, which counts the other rows with the token-count API; the `summary` one estimates
- * them, and was seen putting the tools at twice their size, which left 2 tokens of conversation.
- */
-function conversationTokens(context: SessionContextUsage) {
-  const row = context.breakdown?.categories.find((c) => c.kind === 'used' && c.name === 'Messages')
-  return row?.tokens ?? context.tokens
-}
-
-/** Idle time before compacting. It assumes the 1-hour cache: the mod is no use on a 5-minute one. */
-function idleDelayMs(options: PluginOptions) {
-  const minutes = nonNegative(options.idleMinutes)
-  return minutes ? minutes * 60_000 : HOUR_MS - MARGIN_MS
-}
-
-function minTokens(options: PluginOptions) {
-  return nonNegative(options.minTokens) ?? DEFAULT_MIN_TOKENS
-}
-
-function microTargetTokens(options: PluginOptions) {
-  return nonNegative(options.microTargetTokens) ?? DEFAULT_MICRO_TARGET_TOKENS
-}
-
-const instructions = (at: string, idleMin: number) =>
-  `${IDLE_OPENING}${at}, after ${idleMin} minutes idle, before the prompt cache expired. ` +
-  'Open the summary by saying so. Keep open tasks, decisions and their reasons, pending follow-ups with dates, ' +
-  'file paths touched, and anything the user asked to be remembered.'
+/** The sizes just before compacting: the whole context, and the conversation within it. */
+type SizesBefore = { contextTokens: number; conversationTokens: number }
 
 /** The conversation's size as the timer measured it just before asking for its compaction. */
-type Pending = { conversation: number }
+type Pending = { conversationTokens: number }
 
 /** Per-activation state: the armed timer and what the module has put on screen. */
 type State = {
@@ -80,10 +55,54 @@ type State = {
   outcome?: Outcome
 }
 
+function nonNegative(raw: unknown): number | undefined {
+  if (raw === undefined || raw === '') return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
+
+/** The idle time assumes the 1-hour cache: the mod is no use on a 5-minute one. */
+function readSettings(options: PluginOptions): Settings {
+  const idleMinutes = nonNegative(options.idleMinutes)
+  return {
+    idleMs: idleMinutes ? idleMinutes * 60_000 : HOUR_MS - MARGIN_MS,
+    minTokens: nonNegative(options.minTokens) ?? DEFAULT_MIN_TOKENS,
+    microTargetTokens: nonNegative(options.microTargetTokens) ?? DEFAULT_MICRO_TARGET_TOKENS,
+  }
+}
+
+const isIdleCompaction = (e: SessionCompactInput) => e.agentId === undefined && e.instructions?.startsWith(IDLE_OPENING) === true
+
+const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5)
+
+/**
+ * What compaction can shrink: the conversation, as /context's Messages row counts it. The whole
+ * context when there is no breakdown.
+ *
+ * The row is a residual: the last response's input less the other rows. That needs the `full`
+ * breakdown, which counts the other rows with the token-count API. The `summary` breakdown
+ * estimates them and can be badly off, leaving next to nothing for the conversation.
+ */
+function conversationTokensOf(context: SessionContextUsage) {
+  const row = context.breakdown?.categories.find((c) => c.kind === 'used' && c.name === 'Messages')
+  return row?.tokens ?? context.tokens
+}
+
+const instructions = ({ at, idleMin }: When) =>
+  `${IDLE_OPENING}${at}, after ${idleMin} minutes idle, before the prompt cache expired. ` +
+  'Open the summary by saying so. Keep open tasks, decisions and their reasons, pending follow-ups with dates, ' +
+  'file paths touched, and anything the user asked to be remembered.'
+
 function disarm(state: State) {
   state.generation++
   state.timer?.cancel()
   state.timer = undefined
+}
+
+/** A check for whether a disarm has come since this call. */
+function overtakenSince(state: State) {
+  const generation = state.generation
+  return () => generation !== state.generation
 }
 
 /** A reload while a turn runs, or after the session ended, must not re-arm. */
@@ -96,104 +115,127 @@ function clearStatus($: EngineInterface, state: State) {
   state.hasStatus = false
 }
 
+/** What the session.compact hook decided, cleared so the next compaction starts without it. */
+function takeOutcome(state: State) {
+  const { outcome } = state
+  state.outcome = undefined
+  return outcome
+}
+
+/** The sizes just before compacting; undefined while the context size is unknown. */
+async function measureBefore($: EngineInterface): Promise<SizesBefore | undefined> {
+  const { context } = await $.session.usage({ breakdown: 'full' })
+  // Unknown after a compaction until the next response: nothing to shrink then either.
+  if (context.tokens === undefined) return undefined
+  return { contextTokens: context.tokens, conversationTokens: conversationTokensOf(context) ?? context.tokens }
+}
+
 /** The conversation's size once the compaction stands, as the Messages row has it, or undefined. */
-async function measuredAfter($: EngineInterface) {
+async function measureAfter($: EngineInterface) {
   try {
     const { context } = await $.session.usage({ breakdown: 'full' })
-    return conversationTokens(context)
+    return conversationTokensOf(context)
   } catch {
     return undefined
   }
 }
 
-async function compactIfWorthIt($: EngineInterface, state: State, idleSince: number, latest: number, floor: number, target: number) {
-  const fired = state.generation
+/** Runs /compact with the measured size held for the session.compact hook, and returns what the hook decided. */
+async function runIdleCompaction($: EngineInterface, state: State, conversationTokens: number, when: When) {
+  state.pending = { conversationTokens }
+  state.outcome = undefined
+  // Through the /compact command rather than $.session.compact: the engine doesn't run a plugin's
+  // own hooks on an event that plugin's code raises outside a hook, so this module's session.compact
+  // hook would miss its own call. Raised by the command, the event reaches it.
+  await $.command.run({ command: 'compact', args: instructions(when) }).finally(() => {
+    state.pending = undefined
+  })
+  return takeOutcome(state)
+}
+
+type Report = { outcome: Outcome; when: When; contextTokens: number; settings: Settings; isOvertaken: () => boolean }
+
+/** Writes the line for a compaction that stands to the transcript, and pins it as the status. */
+async function report($: EngineInterface, state: State, { outcome, when, contextTokens, settings, isOvertaken }: Report) {
+  const { summary } = outcome
+  // A summary a hook beneath vetoed has left its own notice.
+  if (outcome.branch.kind === 'summary' && summary?.messages === undefined) return
+  const measuredAfter = await measureAfter($)
+  const line =
+    summary?.messages === undefined
+      ? microLine({ when, outcome, measuredAfter })
+      : summaryLine({ when, outcome, result: summary, contextTokens, measuredAfter, targetTokens: settings.microTargetTokens })
+  $.ui.log(line)
+  // A turn started while the summary ran has already cleared the status; don't pin a stale one.
+  if (isOvertaken()) return
+  $.ui.status(line)
+  state.hasStatus = true
+}
+
+async function compactIfWorthIt($: EngineInterface, state: State, { idle, settings }: { idle: IdleWindow; settings: Settings }) {
+  const isOvertaken = overtakenSince(state)
   try {
-    const { context } = await $.session.usage({ breakdown: 'full' })
-    // Unknown after a compaction until the next response: nothing to shrink then either.
-    if (context.tokens === undefined) return
-    const conversation = conversationTokens(context) ?? 0
-    if (conversation < floor) {
-      $.ui.log(`not compacted: the conversation is ${approx(conversation)} tokens, under the ${approx(floor)} floor`)
+    const sizes = await measureBefore($)
+    if (sizes === undefined) return
+    const { contextTokens, conversationTokens } = sizes
+    if (conversationTokens < settings.minTokens) {
+      $.ui.log(`not compacted: the conversation is ${approx(conversationTokens)} tokens, under the ${approx(settings.minTokens)} floor`)
       return
     }
-    const before = context.tokens ?? 0
     const now = await $.clock.now()
-    const at = hhmm(now)
-    const idleMin = Math.round((now - idleSince) / 60_000)
+    const when: When = { at: hhmm(now), idleMin: Math.round((now - idle.since) / 60_000) }
     // A timer that fires late (the machine slept) finds the cache cold: compacting now would cost
     // what the cold return costs, and lose detail on top.
-    if (now > latest) {
-      $.ui.log(`not compacted: the timer fired ${idleMin} min after the last turn, too late for a warm cache`)
+    if (now > idle.latest) {
+      $.ui.log(`not compacted: the timer fired ${when.idleMin} min after the last turn, too late for a warm cache`)
       return
     }
-    state.pending = { conversation }
-    state.outcome = undefined
-    // Through /compact rather than $.session.compact: the engine runs none of a plugin's own hooks
-    // on an event its own code raised outside a hook, so this module's session.compact hook would
-    // never see its own call. Beneath the command it does.
-    await $.command.run({ command: 'compact', args: instructions(at, idleMin) }).finally(() => {
-      state.pending = undefined
-    })
-    const outcome = state.outcome as Outcome | undefined
-    state.outcome = undefined
+    const outcome = await runIdleCompaction($, state, conversationTokens, when)
     if (outcome === undefined) {
-      $.ui.log(`not compacted by this mod at ${at}: /compact ran, but its session.compact hook never saw it`)
+      $.ui.log(`not compacted by this mod at ${when.at}: /compact ran, but its session.compact hook never saw it`)
       return
     }
-    const summary = outcome.summary
-    // A summary a hook beneath vetoed has left its own notice.
-    if (outcome.branch.kind === 'summary' && summary?.messages === undefined) return
-    const after = await measuredAfter($)
-    const line =
-      summary?.messages === undefined
-        ? microLine({ at, idleMin }, outcome, after)
-        : summaryLine({ at, idleMin }, outcome, summary, before, after, target)
-    $.ui.log(line)
-    // A turn started while the summary ran has already cleared the status; don't pin a stale one.
-    if (fired !== state.generation) return
-    $.ui.status(line)
-    state.hasStatus = true
-  } catch {
-    // a /compact refused or rejected is dropped; the next turn.complete re-arms the timer
+    await report($, state, { outcome, when, contextTokens, settings, isOvertaken })
+  } catch (err) {
+    // The next turn.complete re-arms the timer.
+    $.ui.log(`not compacted: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
-/** Starts the timer: due `ms` from now, it measures the idle time from `idleSince`. */
-function schedule($: EngineInterface, state: State, idleSince: number, ms: number, delay: number, options: PluginOptions) {
-  state.timer = $.clock.after(ms, () => {
+/** Starts the timer, due in `dueInMs`. The idle time counts from `idleSince`. */
+function schedule($: EngineInterface, state: State, settings: Settings, { idleSince, dueInMs }: { idleSince: number; dueInMs: number }) {
+  const idle: IdleWindow = { since: idleSince, latest: idleSince + settings.idleMs + MARGIN_MS }
+  state.timer = $.clock.after(dueInMs, () => {
     state.timer = undefined
-    void compactIfWorthIt($, state, idleSince, idleSince + delay + MARGIN_MS, minTokens(options), microTargetTokens(options))
+    void compactIfWorthIt($, state, { idle, settings })
   })
 }
 
-async function arm($: EngineInterface, state: State, options: PluginOptions) {
+async function arm($: EngineInterface, state: State, settings: Settings) {
   disarm(state)
-  const armed = state.generation
-  const delay = idleDelayMs(options)
+  const isOvertaken = overtakenSince(state)
   const idleSince = await $.clock.now()
   const sessionId = await $.session.id()
-  if (armed !== state.generation) return
-  schedule($, state, idleSince, delay, delay, options)
+  if (isOvertaken()) return
+  schedule($, state, settings, { idleSince, dueInMs: settings.idleMs })
   // Kept for a reload of the module, which cancels the timer.
   await $.state.set(LAST_TURN, { sessionId, at: idleSince })
   // A turn.start that disarmed meanwhile may have cleared it before this write landed.
-  if (armed !== state.generation) await forget($)
+  if (isOvertaken()) await forget($)
 }
 
 /** After a reload: re-arms for what is left of the delay since this session's last turn, if any. */
-async function rearm($: EngineInterface, state: State, options: PluginOptions) {
+async function rearm($: EngineInterface, state: State, settings: Settings) {
   disarm(state)
-  const armed = state.generation
-  const delay = idleDelayMs(options)
-  const { value: last } = await $.state.get(LAST_TURN)
+  const isOvertaken = overtakenSince(state)
+  const { value: lastTurn } = await $.state.get(LAST_TURN)
   const sessionId = await $.session.id()
   const now = await $.clock.now()
-  if (armed !== state.generation || !last || last.sessionId !== sessionId) return
+  if (isOvertaken() || !lastTurn || lastTurn.sessionId !== sessionId) return
   // Past the deadline the timer has fired already, or the session was resumed long after: either way
   // there's nothing to do now.
-  const left = last.at + delay - now
-  if (left > 0) schedule($, state, last.at, left, delay, options)
+  const dueInMs = lastTurn.at + settings.idleMs - now
+  if (dueInMs > 0) schedule($, state, settings, { idleSince: lastTurn.at, dueInMs })
 }
 
 /**
@@ -206,24 +248,25 @@ async function rearm($: EngineInterface, state: State, options: PluginOptions) {
  * the module, which cancels the timer, re-arms it for the time left.
  */
 export const register: Register = (on, options) => {
+  const settings = readSettings(options)
   // A reloaded module can't tell whether the one before it pinned a status: assume it did.
   const state: State = { generation: 0, hasStatus: true }
 
   /**
    * Elides when that is estimated to land under the target, answering with no model call; hands the
-   * call down to core's summary otherwise. `before` is the Messages row just before the call: the
-   * event carries the transcript but not its size.
+   * call down to core's summary otherwise. `conversationTokens` is the Messages row just before the
+   * call: the event carries the transcript but not its size.
    */
-  async function elideOrSummarize(e: SessionCompactInput, before: number, next: Next<'session.compact'>) {
+  async function elideOrSummarize(e: SessionCompactInput, conversationTokens: number, next: Next<'session.compact'>) {
     const { messages, stats } = microCompact(e.messages)
-    const estimate = estimateAfter(before, e.messages, messages)
-    const branch = chooseBranch(estimate, microTargetTokens(options), stats)
+    const estimate = estimateAfter(conversationTokens, e.messages, messages)
+    const branch = chooseBranch(estimate, settings.microTargetTokens, stats)
     if (branch.kind === 'micro') {
-      state.outcome = { branch, before, estimate, stats }
-      return { messages, tokensBefore: before, tokensAfter: estimate }
+      state.outcome = { branch, conversationTokens, estimate, stats }
+      return { messages, tokensBefore: conversationTokens, tokensAfter: estimate }
     }
     const summary = await next(e)
-    state.outcome = { branch, before, estimate, stats, summary }
+    state.outcome = { branch, conversationTokens, estimate, stats, summary }
     return summary
   }
 
@@ -232,8 +275,9 @@ export const register: Register = (on, options) => {
   on('session.compact', { trigger: 'manual' }, async ($, e, next) => {
     if (!isIdleCompaction(e)) return next(e)
     // Raised by someone other than this module's timer, which measured nothing: measure now.
-    const before = state.pending?.conversation ?? conversationTokens((await $.session.usage({ breakdown: 'full' })).context)
-    return before === undefined ? next(e) : elideOrSummarize(e, before, next)
+    const conversationTokens =
+      state.pending?.conversationTokens ?? conversationTokensOf((await $.session.usage({ breakdown: 'full' })).context)
+    return conversationTokens === undefined ? next(e) : elideOrSummarize(e, conversationTokens, next)
   }).catch(($, e, next) => {
     // A throw before deciding still leaves a compaction: core's summary, with the same instructions.
     return next(e)
@@ -250,7 +294,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId === undefined) {
       // never let arming the timer break the turn
-      await arm($, state, options).catch(() => {})
+      await arm($, state, settings).catch(() => {})
     }
     return result
   })
@@ -266,7 +310,7 @@ export const register: Register = (on, options) => {
   // cancels the timer: pick up where the last turn left off.
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    await rearm($, state, options).catch(() => {})
+    await rearm($, state, settings).catch(() => {})
     return result
   })
 }

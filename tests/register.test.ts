@@ -440,29 +440,32 @@ describe('when it fires', () => {
     expect(seen.status).toEqual([])
   })
 
-  test('a rejected compaction is swallowed and the next turn re-arms', async ($, on) => {
+  test('a rejected compaction says why, and the next turn re-arms', async ($, on) => {
     const { clock, seen } = setup($, on, { compact: 'throw' })
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    expect(seen.logs).toEqual([])
+    // The kit treats a throwing hook as absent: the rejection that reaches the mod is the bottom hook's.
+    const line = 'not compacted: no implementation for command.run'
+    expect(seen.logs).toEqual([line])
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    expect(seen.logs).toEqual([])
+    expect(seen.logs).toEqual([line, line])
+    expect(seen.status).toEqual([])
   })
 })
 
 describe('choosing the branch', () => {
   test('elides the reads with no model call when that lands under the target', async ($, on) => {
-    const { clock, seen } = setup($, on, { transcript: READ })
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: READ })
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
     expect(seen.commands.length).toBe(1)
     expect(seen.compacts).toEqual([])
     expect(seen.logs).toEqual([
-      'micro-compacted at 18:50 after 50 min idle (180k conversation → est. 1k, measured 15k; 1 read and 0 thinking blocks elided, no model call)',
+      'micro-compacted at 18:50 after 50 min idle (120k conversation → est. 112k, measured 15k; 1 read and 0 thinking blocks elided, no model call)',
     ])
     expect(seen.status).toEqual(seen.logs)
   })
@@ -474,6 +477,6 @@ describe('choosing the branch', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
-    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (micro est. 1k, over the 100 target; 200k tokens → 12k summary, measured 15k)'])
+    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (micro est. 172k, over the 100 target; 200k tokens → 12k summary, measured 15k)'])
   })
 })
