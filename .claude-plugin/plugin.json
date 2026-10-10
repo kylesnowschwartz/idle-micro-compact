@@ -1,0 +1,40 @@
+{
+  "name": "idle-micro-compact",
+  "version": "0.1.0",
+  "description": "Compacts an idle session before its prompt cache expires: first by eliding file reads and thinking with no model call, falling back to a summary when that would not shrink it enough.",
+  "author": {
+    "name": "Kyle Schwartz"
+  },
+  "license": "MIT",
+  "keywords": [
+    "compact",
+    "prompt-cache",
+    "idle",
+    "micro-compaction",
+    "mod"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "idleMinutes": {
+      "type": "number",
+      "title": "Idle minutes",
+      "description": "Minutes idle before compacting. The default of 50 leaves 10 minutes before a 1-hour prompt cache expires.",
+      "default": 50,
+      "min": 0
+    },
+    "minTokens": {
+      "type": "number",
+      "title": "Minimum conversation tokens",
+      "description": "Leave smaller conversations alone: re-reading them cold is cheap. The system prompt and tools don't count.",
+      "default": 40000,
+      "min": 0
+    },
+    "microTargetTokens": {
+      "type": "number",
+      "title": "Micro-compaction target",
+      "description": "Elide file reads and thinking, with no model call, when that is estimated to leave the conversation at or under this many tokens. Above it, write a summary instead.",
+      "default": 150000,
+      "min": 0
+    }
+  }
+}

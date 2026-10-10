@@ -1,0 +1,4 @@
+{
+  "description": "idle-micro-compact: arm a timer after each main-loop turn, cancel it when the next turn starts, and compact while the cache is still warm: by eliding reads when that is enough, by a summary otherwise",
+  "modules": ["./register.ts"]
+}
