@@ -17,9 +17,6 @@ function readableChars(messages: readonly SessionMessage[]) {
   return n
 }
 
-// A rough rate for English text and code, used to turn removed characters into tokens.
-const CHARS_PER_TOKEN = 4
-
 // A thinking block sent back holds only its signature, not its text. Its size follows the
 // signature's length closely: about this many characters of thinking per signature character,
 // plus a fixed part.
@@ -52,22 +49,28 @@ type EstimateInput = {
   conversationTokens: number
   original: readonly SessionMessage[]
   compacted: readonly SessionMessage[]
-  // the thinking the compaction drops, as thinkingCharsIn counts it
+  // the thinking the compaction drops, as thinkingCharsIn counts it. Masking drops every thinking
+  // block, so this is also all the thinking the conversation holds.
   droppedThinkingChars: number
 }
 
 /**
  * The conversation's size after micro-compaction: its measured size less the removed text and the
- * dropped thinking, at CHARS_PER_TOKEN characters a token. The measured size also holds context
- * with no text in the message list, which micro-compaction leaves in place, so only what was
- * removed comes off and the rest stays in the figure. Missing what dropping images saves, it errs
- * high, toward the summary branch. No token-count request: the timer fires with minutes to spare,
- * not hours.
+ * dropped thinking, turned into tokens at the conversation's own rate, its visible characters (text
+ * and thinking) per measured token. The rate comes from the conversation, so it fits code, numbered
+ * file listings and prose alike. Content the message list cannot see (images, loaded instruction
+ * files, reminders) stays in the token count, so the rate reads a little low and the estimate errs
+ * slightly low, by at most that hidden content times the share removed. No token-count request:
+ * the timer fires with minutes to spare, not hours.
  */
 export function estimateAfter({ conversationTokens, original, compacted, droppedThinkingChars }: EstimateInput) {
+  const visibleChars = readableChars(original) + droppedThinkingChars
+  // Nothing visible to scale by: nothing removable either.
+  if (conversationTokens <= 0 || visibleChars <= 0) return conversationTokens
+  const charsPerToken = visibleChars / conversationTokens
   // A masked image or PDF swaps empty text for a longer placeholder: that removes nothing countable.
   const removedTextChars = Math.max(0, readableChars(original) - readableChars(compacted))
-  const removedTokens = (removedTextChars + droppedThinkingChars) / CHARS_PER_TOKEN
+  const removedTokens = (removedTextChars + droppedThinkingChars) / charsPerToken
   return Math.max(0, Math.round(conversationTokens - removedTokens))
 }
 

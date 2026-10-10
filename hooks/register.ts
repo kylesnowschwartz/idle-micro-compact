@@ -143,7 +143,7 @@ async function measureAfter($: EngineInterface) {
 
 /**
  * The thinking the conversation sends back, in characters. 0 when the API view can't be read: the
- * estimate then leaves the thinking in, erring high, toward the summary.
+ * estimate then counts no thinking, in the rate or in what is removed.
  */
 async function sentBackThinkingChars($: EngineInterface) {
   try {

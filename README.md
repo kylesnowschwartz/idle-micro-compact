@@ -26,7 +26,7 @@ exit cancels it; a reload re-arms it for the time left. When the timer fires:
 3. Otherwise it runs `/compact` with idle-compact's summary instructions. Its own `session.compact`
    hook picks that compaction out by the instructions' opening words and masks the transcript
    (below). It estimates the size afterwards as the Messages row before, less the removed text and
-   the dropped thinking at about 4 characters a token.
+   the dropped thinking, at the conversation's own rate: its visible characters per token.
    - At or under `microTargetTokens` (default 150000), it installs the masked transcript itself. No
      summary request is made.
    - Over the target, or when there was nothing to mask, it hands the compaction to Claude Code's
@@ -53,7 +53,8 @@ are dropped. A second pass leaves placeholders and markers alone.
 The removed thinking is counted from the conversation's Messages API form
 (`$.session.messages({ as: 'api' })`). A thinking block sent back holds only its signature, so its
 size is estimated as 1.218 × the signature's length + 81.6 characters, or its text's length when it
-holds text. When that form can't be read, the thinking counts as nothing and the estimate errs high.
+holds text. When that form can't be read, the thinking counts as nothing, both in the rate and in
+what is removed.
 
 Either way it leaves one line in the transcript and the status line. For example:
 
@@ -76,11 +77,12 @@ as a manual `/compact`, and the `/compact …` line shows in the transcript.
 
 ## Caveats
 
-- **The estimate errs high.** It subtracts only the text `$.session.messages()` shows as removed
-  (message text, tool inputs and tool results) and the estimated thinking. Context with no text
-  there, such as loaded instruction files and reminders, stays in the figure, as it stays after
-  masking. Images have no text there either, so the estimate misses what masking them saves, and
-  leans toward the summary.
+- **The estimate errs slightly low.** It counts only the characters `$.session.messages()` shows
+  (message text, tool inputs and tool results) and the estimated thinking, and divides them by the
+  measured tokens to get the rate. Context with no text there, such as images, loaded instruction
+  files and reminders, stays in the token count, so the rate reads a little low and the estimate
+  falls short by at most that hidden content times the share removed. It also misses what masking
+  an image saves.
 - **Micro-compaction rewrites the transcript from the first change on**, usually the first thinking
   block. The next request re-caches from that point. That is cheaper than re-caching the whole
   conversation cold, but it is not free.

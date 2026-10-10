@@ -495,7 +495,7 @@ describe('choosing the branch', () => {
     expect(seen.commands.length).toBe(1)
     expect(seen.compacts).toEqual([])
     expect(seen.logs).toEqual([
-      'micro-compacted at 18:50 after 50 min idle (120k conversation → est. 112k, measured 15k; 1 tool result masked, 0 trimmed to head and tail, 0 thinking blocks dropped, no model call)',
+      'micro-compacted at 18:50 after 50 min idle (120k conversation → est. 1k, measured 15k; 1 tool result masked, 0 trimmed to head and tail, 0 thinking blocks dropped, no model call)',
     ])
     expect(seen.status).toEqual(seen.logs)
   })
@@ -507,6 +507,6 @@ describe('choosing the branch', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
-    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (micro est. 172k, over the 100 target; 200k tokens → 12k summary, measured 15k)'])
+    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (micro est. 1k, over the 100 target; 200k tokens → 12k summary, measured 15k)'])
   })
 })

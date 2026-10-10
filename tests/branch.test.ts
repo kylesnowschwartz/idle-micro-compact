@@ -95,8 +95,10 @@ describe('the session.compact hook', () => {
     const result = await compact($, {})
     if (result.skip !== undefined) throw new Error(result.skip)
     const expected = maskOldToolResults(transcript).messages
+    const withThinking = estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingChars: SIGNED_THINKING_CHARS })
     const withoutThinking = estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingChars: 0 })
-    expect(result.tokensAfter).toBe(withoutThinking - SIGNED_THINKING_CHARS / 4)
+    expect(result.tokensAfter).toBe(withThinking)
+    expect(withThinking).not.toBe(withoutThinking)
   })
 
   test('counts the thinking as nothing when the API view throws', async ($, on) => {
@@ -145,15 +147,31 @@ describe('the session.compact hook', () => {
 })
 
 describe('the estimate', () => {
-  test('takes the removed text off the measured size, at 4 characters a token', () => {
-    const original: SessionMessage[] = [{ role: 'user', text: 'x'.repeat(1000), toolUses: [] }]
-    const trimmed: SessionMessage[] = [{ role: 'user', text: 'x'.repeat(200), toolUses: [] }]
-    expect(estimateAfter({ conversationTokens: 80_000, original, compacted: trimmed, droppedThinkingChars: 0 })).toBe(79_800)
+  const text = (n: number): SessionMessage[] => [{ role: 'user', text: 'x'.repeat(n), toolUses: [] }]
+
+  test("takes the removed share of the visible characters off, at the conversation's own rate", () => {
+    // 1000 characters in 400 tokens: 2.5 a token, so 800 removed are 320 tokens
+    expect(estimateAfter({ conversationTokens: 400, original: text(1000), compacted: text(200), droppedThinkingChars: 0 })).toBe(80)
   })
 
-  test('never goes below zero', () => {
-    const original: SessionMessage[] = [{ role: 'user', text: 'x'.repeat(1000), toolUses: [] }]
-    expect(estimateAfter({ conversationTokens: 100, original, compacted: [], droppedThinkingChars: 0 })).toBe(0)
+  test('the same removed characters take off more tokens in a denser conversation', () => {
+    const sparse = estimateAfter({ conversationTokens: 250, original: text(1000), compacted: text(200), droppedThinkingChars: 0 })
+    const dense = estimateAfter({ conversationTokens: 500, original: text(1000), compacted: text(200), droppedThinkingChars: 0 })
+    // 4 and 2 characters a token: 200 and 400 tokens off
+    expect(250 - sparse).toBe(200)
+    expect(500 - dense).toBe(400)
+  })
+
+  test('content the list cannot see stays in the figure', () => {
+    // 1000 visible characters, the rest of the 1000 tokens hidden: removing all visible text leaves
+    // the tokens it does not account for
+    expect(estimateAfter({ conversationTokens: 1000, original: text(1000), compacted: [], droppedThinkingChars: 0 })).toBe(0)
+    expect(estimateAfter({ conversationTokens: 1000, original: text(1000), compacted: text(500), droppedThinkingChars: 0 })).toBe(500)
+  })
+
+  test('the dropped thinking counts toward the rate and comes off with the text', () => {
+    // 600 text + 400 thinking characters in 500 tokens: 2 a token; 200 text and all thinking removed
+    expect(estimateAfter({ conversationTokens: 500, original: text(600), compacted: text(400), droppedThinkingChars: 400 })).toBe(200)
   })
 
   test("counts a Read's text once, though both its tool use and its result carry it", () => {
@@ -163,8 +181,9 @@ describe('the estimate', () => {
       { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r', text: body, isError: false }] },
     ]
     const trimmed: SessionMessage[] = [original[0]!, { ...original[1]!, toolResults: [{ tool_use_id: 'r', text: '', isError: false }] }]
-    // 900 characters removed, 225 tokens; counted twice it would be 450
-    expect(estimateAfter({ conversationTokens: 90_200, original, compacted: trimmed, droppedThinkingChars: 0 })).toBe(89_975)
+    // 902 visible characters (900 and the `{}` input) in 451 tokens: 2 a token, 900 removed are 450.
+    // Counted twice, the rate would be 4 and the result 226
+    expect(estimateAfter({ conversationTokens: 451, original, compacted: trimmed, droppedThinkingChars: 0 })).toBe(1)
   })
 
   test('a masked image, empty text swapped for a placeholder, keeps the measured size', () => {
@@ -181,12 +200,9 @@ describe('the estimate', () => {
     expect(estimateAfter({ conversationTokens: 50_000, original, compacted: trimmed, droppedThinkingChars: 0 })).toBe(50_000)
   })
 
-  test('an empty transcript keeps the measured size', () => {
+  test('with no visible characters or no tokens there is nothing to scale, and the size stays', () => {
     expect(estimateAfter({ conversationTokens: 5_000, original: [], compacted: [], droppedThinkingChars: 0 })).toBe(5_000)
-  })
-
-  test('takes the dropped thinking off too, at 4 characters a token', () => {
-    expect(estimateAfter({ conversationTokens: 5_000, original: [], compacted: [], droppedThinkingChars: 4_000 })).toBe(4_000)
+    expect(estimateAfter({ conversationTokens: 0, original: text(1000), compacted: [], droppedThinkingChars: 0 })).toBe(0)
   })
 })
 
