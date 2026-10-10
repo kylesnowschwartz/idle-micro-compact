@@ -5,3 +5,9 @@ node_modules/
 # Internal dev notes and agent instructions
 NOTES.md
 .claude/
+
+# Secrets
+.env
+.env.*
+*.pem
+*-key.json
