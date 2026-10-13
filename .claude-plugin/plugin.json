@@ -1,6 +1,6 @@
 {
   "name": "idle-micro-compact",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Compacts an idle session before its prompt cache expires: first by masking old tool results and dropping thinking with no model call, falling back to a summary when that would not shrink it enough.",
   "author": {
     "name": "Kyle Schwartz"
