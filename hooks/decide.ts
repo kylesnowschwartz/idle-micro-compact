@@ -4,8 +4,8 @@ import type { MaskStats } from './mask.ts'
 /**
  * How much of a message the model reads as text: its text, its tool calls' arguments and its tool
  * results. Each tool use also carries its result's text, which the result message holds already,
- * so it is left out to avoid counting a Read twice. Images and thinking have no text here: thinking
- * is counted from the API view instead (thinkingCharsIn), and images not at all.
+ * so it is left out to avoid counting a Read twice. Masking changes only tool results, so the
+ * difference before and after it is the tool-result text removed.
  */
 function readableChars(messages: readonly SessionMessage[]) {
   let n = 0
@@ -17,31 +17,35 @@ function readableChars(messages: readonly SessionMessage[]) {
   return n
 }
 
-// A thinking block sent back holds only its signature, not its text. Its size follows the
-// signature's length closely: about this many characters of thinking per signature character,
-// plus a fixed part.
-const THINKING_CHARS_PER_SIGNATURE_CHAR = 1.218
-const THINKING_CHARS_FIXED = 81.6
+// Token rates for Opus 5.5's tokenizer.
+// Tool-result text (file contents, command output, search results): about 2.3 characters a token.
+const TOKENS_PER_TOOL_RESULT_CHAR = 0.44
+// A thinking block sent back holds only its signature, not its text. Its cost follows the
+// signature's length less a fixed part per block, so a short signature costs nothing countable.
+const THINKING_TOKENS_PER_SIGNATURE_CHAR = 0.2745
+const THINKING_TOKENS_SUBTRACTED_PER_BLOCK = 274
+// An image or PDF in a tool result, which the message list shows as no text.
+const TOKENS_PER_MASKED_MEDIA = 1000
 
-/** One thinking block's characters: its text when it holds any, else estimated from its signature. */
-function thinkingCharsOf(block: ApiMessage['content'][number]) {
-  if (typeof block.thinking === 'string' && block.thinking) return block.thinking.length
-  // A redacted block carries its encrypted thinking in `data` rather than a signature.
+/** One thinking block's tokens, from its signature's length. */
+function thinkingTokensOf(block: ApiMessage['content'][number]) {
+  // Stopgap: a redacted block carries its encrypted thinking in `data` rather than a signature, and
+  // is costed at the signature rate until redacted blocks have a rate of their own.
   const signature = typeof block.signature === 'string' ? block.signature : typeof block.data === 'string' ? block.data : ''
-  return signature ? Math.round(THINKING_CHARS_PER_SIGNATURE_CHAR * signature.length + THINKING_CHARS_FIXED) : 0
+  return Math.max(0, THINKING_TOKENS_PER_SIGNATURE_CHAR * signature.length - THINKING_TOKENS_SUBTRACTED_PER_BLOCK)
 }
 
 /**
- * The thinking the conversation sends back with each request, in characters. The hook's message
+ * The tokens of the thinking the conversation sends back with each request. The hook's message
  * list shows thinking as empty rows, so this reads it from the Messages API form, where each
- * thinking block keeps its text or signature. Dropping thinking-only messages removes all of it.
+ * thinking block keeps its signature. Dropping thinking-only messages removes all of it.
  */
-export function thinkingCharsIn(messages: readonly ApiMessage[]) {
+export function thinkingTokensIn(messages: readonly ApiMessage[]) {
   let n = 0
   for (const m of messages) {
-    for (const block of m.content) if (block.type === 'thinking' || block.type === 'redacted_thinking') n += thinkingCharsOf(block)
+    for (const block of m.content) if (block.type === 'thinking' || block.type === 'redacted_thinking') n += thinkingTokensOf(block)
   }
-  return n
+  return Math.round(n)
 }
 
 type EstimateInput = {
@@ -49,28 +53,25 @@ type EstimateInput = {
   conversationTokens: number
   original: readonly SessionMessage[]
   compacted: readonly SessionMessage[]
-  // the thinking the compaction drops, as thinkingCharsIn counts it. Masking drops every thinking
+  // the thinking the compaction drops, as thinkingTokensIn counts it. Masking drops every thinking
   // block, so this is also all the thinking the conversation holds.
-  droppedThinkingChars: number
+  droppedThinkingTokens: number
+  // the images and PDFs the compaction replaced with a placeholder
+  maskedMedia: number
 }
 
 /**
- * The conversation's size after micro-compaction: its measured size less the removed text and the
- * dropped thinking, turned into tokens at the conversation's own rate, its visible characters (text
- * and thinking) per measured token. The rate comes from the conversation, so it fits code, numbered
- * file listings and prose alike. Content the message list cannot see (images, loaded instruction
- * files, reminders) stays in the token count, so the rate reads a little low and the estimate errs
- * slightly low, by at most that hidden content times the share removed. No token-count request:
- * the timer fires with minutes to spare, not hours.
+ * The conversation's size after micro-compaction: its measured size less the removed tool-result
+ * text, the dropped thinking and the masked images and PDFs, each at a fixed token rate. Two
+ * removals are not counted: attachments the engine drops along with a rebuilt message, and images
+ * in other tools' results, which the message list does not show. So the estimate errs high, toward
+ * the summary. No token-count request: the timer fires with minutes to spare, not hours.
  */
-export function estimateAfter({ conversationTokens, original, compacted, droppedThinkingChars }: EstimateInput) {
-  const visibleChars = readableChars(original) + droppedThinkingChars
-  // Nothing visible to scale by: nothing removable either.
-  if (conversationTokens <= 0 || visibleChars <= 0) return conversationTokens
-  const charsPerToken = visibleChars / conversationTokens
-  // A masked image or PDF swaps empty text for a longer placeholder: that removes nothing countable.
-  const removedTextChars = Math.max(0, readableChars(original) - readableChars(compacted))
-  const removedTokens = (removedTextChars + droppedThinkingChars) / charsPerToken
+export function estimateAfter({ conversationTokens, original, compacted, droppedThinkingTokens, maskedMedia }: EstimateInput) {
+  // A masked image or PDF swaps empty text for a longer placeholder: its text removes nothing.
+  const removedToolResultChars = Math.max(0, readableChars(original) - readableChars(compacted))
+  const removedTokens =
+    TOKENS_PER_TOOL_RESULT_CHAR * removedToolResultChars + droppedThinkingTokens + TOKENS_PER_MASKED_MEDIA * maskedMedia
   return Math.max(0, Math.round(conversationTokens - removedTokens))
 }
 

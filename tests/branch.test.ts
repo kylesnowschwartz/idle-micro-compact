@@ -1,6 +1,6 @@
 import type { ApiMessage, ContextCategory, On, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code'
 import { type Engine, describe, expect, test, tier } from 'claude-code/testing'
-import { chooseBranch, estimateAfter, thinkingCharsIn } from '../hooks/decide.ts'
+import { chooseBranch, estimateAfter, thinkingTokensIn } from '../hooks/decide.ts'
 import { maskOldToolResults } from '../hooks/mask.ts'
 import { microLine, summaryLine } from '../hooks/lines.ts'
 
@@ -29,13 +29,13 @@ const transcript: SessionMessage[] = [
   { role: 'assistant', text: 'a.ts defines the parser.', toolUses: [], handle: 'a2' },
 ]
 
-/** The API view of a conversation with one thinking block of a 1000-character signature. */
+/** The API view of a conversation with one thinking block of a 4000-character signature. */
 const SIGNED_THINKING: ApiMessage[] = [
   { role: 'user', content: [{ type: 'text', text: 'read a.ts' }] },
-  { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 's'.repeat(1000) }, { type: 'text', text: 'ok' }] },
+  { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 's'.repeat(4000) }, { type: 'text', text: 'ok' }] },
 ]
-// 1.218 × 1000 + 81.6, rounded
-const SIGNED_THINKING_CHARS = 1300
+// 0.2745 × 4000 − 274
+const SIGNED_THINKING_TOKENS = 824
 
 const noReads: SessionMessage[] = [
   { role: 'user', text: 'hello', toolUses: [], handle: 'u0' },
@@ -83,7 +83,7 @@ describe('the session.compact hook', () => {
     expect(result.messages).toEqual(expected)
     expect(result.tokensBefore).toBe(100_000)
     // No session.messages answer beneath: the thinking counts as nothing
-    expect(result.tokensAfter).toBe(estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingChars: 0 }))
+    expect(result.tokensAfter).toBe(estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingTokens: 0, maskedMedia: 0 }))
     expect(result.messages?.find((m) => m.toolResults)?.toolResults?.[0]?.text).toBe(
       '[file contents elided by compaction: /src/a.ts, 2000 lines. Read it again if needed.]',
     )
@@ -95,8 +95,8 @@ describe('the session.compact hook', () => {
     const result = await compact($, {})
     if (result.skip !== undefined) throw new Error(result.skip)
     const expected = maskOldToolResults(transcript).messages
-    const withThinking = estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingChars: SIGNED_THINKING_CHARS })
-    const withoutThinking = estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingChars: 0 })
+    const withThinking = estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingTokens: SIGNED_THINKING_TOKENS, maskedMedia: 0 })
+    const withoutThinking = estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingTokens: 0, maskedMedia: 0 })
     expect(result.tokensAfter).toBe(withThinking)
     expect(withThinking).not.toBe(withoutThinking)
   })
@@ -110,7 +110,7 @@ describe('the session.compact hook', () => {
     if (result.skip !== undefined) throw new Error(result.skip)
     const expected = maskOldToolResults(transcript).messages
     expect(result.messages).toEqual(expected)
-    expect(result.tokensAfter).toBe(estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingChars: 0 }))
+    expect(result.tokensAfter).toBe(estimateAfter({ conversationTokens: 100_000, original: transcript, compacted: expected, droppedThinkingTokens: 0, maskedMedia: 0 }))
   })
 
   test('asks for the summary when the estimate is over the target', { options: { microTargetTokens: 100 } }, async ($, on) => {
@@ -149,29 +149,34 @@ describe('the session.compact hook', () => {
 describe('the estimate', () => {
   const text = (n: number): SessionMessage[] => [{ role: 'user', text: 'x'.repeat(n), toolUses: [] }]
 
-  test("takes the removed share of the visible characters off, at the conversation's own rate", () => {
-    // 1000 characters in 400 tokens: 2.5 a token, so 800 removed are 320 tokens
-    expect(estimateAfter({ conversationTokens: 400, original: text(1000), compacted: text(200), droppedThinkingChars: 0 })).toBe(80)
+  const none = { droppedThinkingTokens: 0, maskedMedia: 0 }
+
+  test('takes removed tool-result text off at 0.44 tokens a character, whatever the size', () => {
+    // 800 removed are 352 tokens
+    expect(estimateAfter({ conversationTokens: 1000, original: text(1000), compacted: text(200), ...none })).toBe(648)
+    expect(estimateAfter({ conversationTokens: 100_000, original: text(1000), compacted: text(200), ...none })).toBe(99_648)
   })
 
-  test('the same removed characters take off more tokens in a denser conversation', () => {
-    const sparse = estimateAfter({ conversationTokens: 250, original: text(1000), compacted: text(200), droppedThinkingChars: 0 })
-    const dense = estimateAfter({ conversationTokens: 500, original: text(1000), compacted: text(200), droppedThinkingChars: 0 })
-    // 4 and 2 characters a token: 200 and 400 tokens off
-    expect(250 - sparse).toBe(200)
-    expect(500 - dense).toBe(400)
+  test('takes the dropped thinking off as counted', () => {
+    expect(estimateAfter({ conversationTokens: 10_000, original: text(100), compacted: text(100), ...none, droppedThinkingTokens: 824 })).toBe(9_176)
   })
 
-  test('content the list cannot see stays in the figure', () => {
-    // 1000 visible characters, the rest of the 1000 tokens hidden: removing all visible text leaves
-    // the tokens it does not account for
-    expect(estimateAfter({ conversationTokens: 1000, original: text(1000), compacted: [], droppedThinkingChars: 0 })).toBe(0)
-    expect(estimateAfter({ conversationTokens: 1000, original: text(1000), compacted: text(500), droppedThinkingChars: 0 })).toBe(500)
+  test('takes 1000 tokens off for each masked image or PDF', () => {
+    expect(estimateAfter({ conversationTokens: 10_000, original: [], compacted: [], ...none, maskedMedia: 3 })).toBe(7_000)
   })
 
-  test('the dropped thinking counts toward the rate and comes off with the text', () => {
-    // 600 text + 400 thinking characters in 500 tokens: 2 a token; 200 text and all thinking removed
-    expect(estimateAfter({ conversationTokens: 500, original: text(600), compacted: text(400), droppedThinkingChars: 400 })).toBe(200)
+  test('adds the three together', () => {
+    // 352 + 824 + 1000
+    expect(estimateAfter({ conversationTokens: 10_000, original: text(1000), compacted: text(200), droppedThinkingTokens: 824, maskedMedia: 1 })).toBe(7_824)
+  })
+
+  test('with nothing removed the size stays', () => {
+    expect(estimateAfter({ conversationTokens: 5_000, original: text(1000), compacted: text(1000), ...none })).toBe(5_000)
+    expect(estimateAfter({ conversationTokens: 5_000, original: [], compacted: [], ...none })).toBe(5_000)
+  })
+
+  test('never goes below 0', () => {
+    expect(estimateAfter({ conversationTokens: 100, original: text(1000), compacted: [], ...none, maskedMedia: 1 })).toBe(0)
   })
 
   test("counts a Read's text once, though both its tool use and its result carry it", () => {
@@ -181,52 +186,54 @@ describe('the estimate', () => {
       { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r', text: body, isError: false }] },
     ]
     const trimmed: SessionMessage[] = [original[0]!, { ...original[1]!, toolResults: [{ tool_use_id: 'r', text: '', isError: false }] }]
-    // 902 visible characters (900 and the `{}` input) in 451 tokens: 2 a token, 900 removed are 450.
-    // Counted twice, the rate would be 4 and the result 226
-    expect(estimateAfter({ conversationTokens: 451, original, compacted: trimmed, droppedThinkingChars: 0 })).toBe(1)
+    // 900 removed are 396 tokens; counted twice they would be 792
+    expect(estimateAfter({ conversationTokens: 1000, original, compacted: trimmed, ...none })).toBe(604)
   })
 
-  test('a masked image, empty text swapped for a placeholder, keeps the measured size', () => {
+  test('masked images and PDFs come off at the media rate; their placeholder text takes nothing off', () => {
+    const image = { type: 'image', file: { dimensions: { originalWidth: 256, originalHeight: 256 } } }
     const original: SessionMessage[] = [
       { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'i', tool: 'Read', input: { file_path: '/w/img.png' } }] },
-      {
-        role: 'user', text: '', toolUses: [],
-        toolResults: [{ tool_use_id: 'i', text: '', isError: false, result: { type: 'image', file: { dimensions: { originalWidth: 256, originalHeight: 256 } } } }],
-      },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'i', text: '', isError: false, result: image }] },
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'p', tool: 'Read', input: { file_path: '/w/doc.pdf' } }] },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'p', text: '', isError: false, result: { type: 'pdf' } }] },
       ...fiveShortCalls,
     ]
     const { messages: trimmed, stats } = maskOldToolResults(original)
-    expect(stats.masked).toBe(1)
-    expect(estimateAfter({ conversationTokens: 50_000, original, compacted: trimmed, droppedThinkingChars: 0 })).toBe(50_000)
-  })
-
-  test('with no visible characters or no tokens there is nothing to scale, and the size stays', () => {
-    expect(estimateAfter({ conversationTokens: 5_000, original: [], compacted: [], droppedThinkingChars: 0 })).toBe(5_000)
-    expect(estimateAfter({ conversationTokens: 0, original: text(1000), compacted: [], droppedThinkingChars: 0 })).toBe(0)
+    expect(stats.masked).toBe(2)
+    expect(stats.mediaMasked).toBe(2)
+    expect(estimateAfter({ conversationTokens: 50_000, original, compacted: trimmed, ...none, maskedMedia: stats.mediaMasked })).toBe(48_000)
   })
 })
 
 describe('the thinking size', () => {
-  test('is estimated from the signature when a block holds no text', () => {
-    expect(thinkingCharsIn(SIGNED_THINKING)).toBe(SIGNED_THINKING_CHARS)
+  test('is estimated from the signature: 0.2745 tokens a character, less 274 a block', () => {
+    expect(thinkingTokensIn(SIGNED_THINKING)).toBe(SIGNED_THINKING_TOKENS)
   })
 
-  test('is the text length when a block holds its text, and a redacted block counts by its data', () => {
+  test('is 0 for a block whose signature is too short to outweigh the fixed part', () => {
+    const short = (n: number): ApiMessage[] => [{ role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 's'.repeat(n) }] }]
+    expect(thinkingTokensIn(short(500))).toBe(0)
+    expect(thinkingTokensIn(short(998))).toBe(0)
+    // Clamped per block: the short block does not cancel part of the long one
+    expect(thinkingTokensIn([...short(500), ...SIGNED_THINKING])).toBe(SIGNED_THINKING_TOKENS)
+  })
+
+  test('counts a redacted block by its data at the signature rate', () => {
     const messages: ApiMessage[] = [
-      { role: 'assistant', content: [{ type: 'thinking', thinking: 'x'.repeat(500), signature: 's'.repeat(1000) }] },
-      { role: 'assistant', content: [{ type: 'redacted_thinking', data: 'd'.repeat(100) }, { type: 'text', text: 'not thinking' }] },
+      { role: 'assistant', content: [{ type: 'redacted_thinking', data: 'd'.repeat(2000) }, { type: 'text', text: 'not thinking' }] },
     ]
-    // 500 + round(1.218 × 100 + 81.6)
-    expect(thinkingCharsIn(messages)).toBe(500 + 203)
+    // 0.2745 × 2000 − 274
+    expect(thinkingTokensIn(messages)).toBe(275)
   })
 
   test('is 0 with no thinking blocks', () => {
-    expect(thinkingCharsIn([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }])).toBe(0)
+    expect(thinkingTokensIn([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }])).toBe(0)
   })
 })
 
 describe('the branch', () => {
-  const none = { masked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
+  const none = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
   const stats = { ...none, masked: 3, thinkingDropped: 1 }
 
   test('at the target is micro, over it the summary', () => {
@@ -248,10 +255,10 @@ describe('the branch', () => {
 describe('the line', () => {
   const when = { at: '18:50', idleMin: 50 }
 
-  const none = { masked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
+  const none = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
 
   test('micro: sizes and what was taken out', () => {
-    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 175_000, estimate: 73_400, stats: { masked: 21, trimmedToHeadAndTail: 8, errorsCutToStart: 0, thinkingDropped: 66 } }
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 175_000, estimate: 73_400, stats: { masked: 21, mediaMasked: 0, trimmedToHeadAndTail: 8, errorsCutToStart: 0, thinkingDropped: 66 } }
     expect(microLine({ when: { at: '23:00', idleMin: 50 }, outcome })).toEqual({
       status: 'trimmed at 23:00: 175k → about 73k tokens',
       log: 'trimmed at 23:00 after 50 min idle: 175k → about 73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)',
@@ -260,7 +267,7 @@ describe('the line', () => {
 
   test('micro: cut errors are named only when there are some', () => {
     const base = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000 }
-    const stats = { masked: 3, trimmedToHeadAndTail: 4, errorsCutToStart: 2, thinkingDropped: 5 }
+    const stats = { masked: 3, mediaMasked: 0, trimmedToHeadAndTail: 4, errorsCutToStart: 2, thinkingDropped: 5 }
     expect(microLine({ when, outcome: { ...base, stats } }).log).toBe(
       'trimmed at 18:50 after 50 min idle: 80k → about 30k tokens (3 old tool results removed, 4 shortened, 2 errors cut to their start, 5 thinking blocks dropped)',
     )
@@ -269,7 +276,7 @@ describe('the line', () => {
   })
 
   test('micro: singular counts', () => {
-    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000, stats: { masked: 1, trimmedToHeadAndTail: 1, errorsCutToStart: 0, thinkingDropped: 1 } }
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000, stats: { masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 1, errorsCutToStart: 0, thinkingDropped: 1 } }
     expect(microLine({ when, outcome }).log).toBe(
       'trimmed at 18:50 after 50 min idle: 80k → about 30k tokens (1 old tool result removed, 1 shortened, 1 thinking block dropped)',
     )
