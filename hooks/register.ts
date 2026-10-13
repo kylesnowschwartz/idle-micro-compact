@@ -1,7 +1,7 @@
 import type { EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionContextUsage, Timer } from 'claude-code'
 import { type AppendedRows, appendedRows } from './carried.ts'
-import { chooseBranch, estimateAfter, thinkingTokensIn } from './decide.ts'
-import { maskOldToolResults } from './mask.ts'
+import { chooseBranch, droppedThinkingTokensIn, estimateAfter } from './decide.ts'
+import { maskOldToolResults, thinkingKept } from './mask.ts'
 import { type Outcome, type When, approx, microLine, summaryLine } from './lines.ts'
 
 const MINUTE_MS = 60_000
@@ -133,12 +133,13 @@ async function measureBefore($: EngineInterface): Promise<SizesBefore | undefine
 }
 
 /**
- * The thinking the conversation sends back, in tokens. 0 when the API view can't be read: the
- * estimate then takes no thinking off.
+ * The thinking the trim drops, in tokens: the thinking the conversation sends back, less that of
+ * the thinking-only messages kept whole (`isKept`, as droppedThinkingTokensIn takes it). 0 when
+ * the API view can't be read: the estimate then takes no thinking off.
  */
-async function sentBackThinkingTokens($: EngineInterface) {
+async function droppedThinkingTokens($: EngineInterface, isKept: readonly boolean[]) {
   try {
-    return thinkingTokensIn(await $.session.messages({ as: 'api' }))
+    return droppedThinkingTokensIn(await $.session.messages({ as: 'api' }), isKept)
   } catch {
     return 0
   }
@@ -159,11 +160,12 @@ type Compaction = {
  * call: the event carries the transcript but not its size.
  */
 async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens, state, settings, rows }: Compaction) {
-  const { messages, stats } = maskOldToolResults(e.messages, rows.carriers(e.messages))
-  // Dropping the thinking-only messages drops all the thinking the API view holds; with none dropped, none counts.
-  const droppedThinkingTokens = stats.thinkingDropped ? await sentBackThinkingTokens($) : 0
+  const carriers = rows.carriers(e.messages)
+  const { messages, stats } = maskOldToolResults(e.messages, carriers)
+  // With no thinking-only message dropped, no thinking counts.
+  const droppedThinking = stats.thinkingDropped ? await droppedThinkingTokens($, thinkingKept(e.messages, carriers)) : 0
   const estimate = estimateAfter({
-    conversationTokens, original: e.messages, compacted: messages, droppedThinkingTokens, maskedMedia: stats.mediaMasked,
+    conversationTokens, original: e.messages, compacted: messages, droppedThinkingTokens: droppedThinking, maskedMedia: stats.mediaMasked,
   })
   const branch = chooseBranch(estimate, settings.microTargetTokens, stats)
   if (branch.kind === 'micro') {

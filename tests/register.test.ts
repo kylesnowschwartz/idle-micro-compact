@@ -2,6 +2,8 @@ import type {
   ContextCategory, ContextCategoryKind, ModelUsage, On, SessionAppendInput, SessionContextBreakdown, SessionMessage, TurnCompleteInput,
 } from 'claude-code'
 import { type Engine, describe, expect, mock, test, tier } from 'claude-code/testing'
+import { estimateAfter } from '../hooks/decide.ts'
+import { approx } from '../hooks/lines.ts'
 
 // Adapted from davidar/claude-idle-compact, tests/register.test.ts at commit
 // 35ec925345acfce26bc0ba260c1f611dceab1148 (MIT; see LICENSE). The test's command.run hook stands
@@ -553,6 +555,12 @@ const ROW_KINDS = {
   queuedTaskNotification: { door: 'delivery', origin: { kind: 'task-notification' }, type: 'attachment', name: 'queued_command' },
   taskNotification: { door: 'prompt', origin: { kind: 'task-notification' }, type: 'user' },
   peerPrompt: { door: 'prompt', origin: { kind: 'peer' }, type: 'user' },
+  queuedSendMessage: { door: 'delivery', origin: { kind: 'peer-send-message' }, type: 'attachment', name: 'queued_command' },
+  sendMessage: { door: 'prompt', origin: { kind: 'peer-send-message' }, type: 'user', isMeta: true },
+  queuedBridgeMessage: { door: 'delivery', origin: { kind: 'bridge' }, type: 'attachment', name: 'queued_command' },
+  bridgeMessage: { door: 'prompt', origin: { kind: 'bridge' }, type: 'user', isMeta: true },
+  queuedScheduledPrompt: { door: 'delivery', origin: { kind: 'scheduled-trigger' }, type: 'attachment', name: 'queued_command' },
+  scheduledPrompt: { door: 'prompt', origin: { kind: 'scheduled-trigger' }, type: 'user', isMeta: true },
 } satisfies Record<string, Row>
 
 /** Raises session.append for one row, as the host does for every row it keeps. */
@@ -620,6 +628,50 @@ describe('messages that carry reports or queued messages', () => {
     await idle($, clock)
     expect(keptWhole(seen, 'u1')).toBe(true)
     expect(keptWhole(seen, 'u2')).toBe(false)
+  })
+
+  for (const kind of ['queuedSendMessage', 'sendMessage', 'queuedBridgeMessage', 'bridgeMessage'] as const) {
+    test(`a ${kind} row keeps the message before it whole`, async ($, on) => {
+      const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+      await appendTwoReads($, [() => append($, 'h1', kind)])
+      await idle($, clock)
+      expect(keptWhole(seen, 'u1')).toBe(true)
+      expect(seen.debug).toEqual([KEPT_ONE])
+    })
+  }
+
+  test('scheduled prompts are not kept', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'queuedScheduledPrompt'), () => append($, 'h2', 'scheduledPrompt')])
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(seen.debug).toEqual([])
+  })
+
+  test('a thinking-only message kept whole leaves its thinking out of the estimate', async ($, on) => {
+    const transcript: SessionMessage[] = [
+      ...TWO_READS.slice(0, 3),
+      { role: 'assistant', text: '', toolUses: [], handle: 't1' },
+      ...TWO_READS.slice(3, 5),
+      { role: 'assistant', text: '', toolUses: [], handle: 't2' },
+      ...TWO_READS.slice(5),
+    ]
+    // 0.2745 × 40000 − 274 = 10706 tokens for t1's block; 0.2745 × 4000 − 274 = 824 for t2's
+    const block = (n: number) => ({ role: 'assistant' as const, content: [{ type: 'thinking' as const, thinking: '', signature: 's'.repeat(n) }] })
+    on('session.messages', () => ({ value: [block(40_000), block(4_000)] }))
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript })
+    await append($, 'u0', 'prompt')
+    await append($, 'a1', 'response')
+    await append($, 'u1', 'toolResult')
+    await append($, 't1', 'response')
+    await append($, 'h1', 'report')
+    await idle($, clock)
+    expect(seen.installed?.map((m) => m.handle)).toContain('t1')
+    expect(seen.installed?.map((m) => m.handle)).not.toContain('t2')
+    const after = estimateAfter({ conversationTokens: 120_000, original: transcript, compacted: seen.installed!, droppedThinkingTokens: 824, maskedMedia: 0 })
+    expect(approx(after)).not.toBe(approx(after - 10_706))
+    expect(seen.status).toEqual([`trimmed at 18:50: 120k → about ${approx(after)} tokens`])
+    expect(seen.debug).toEqual([KEPT_ONE])
   })
 
   test('task notifications are not kept', async ($, on) => {

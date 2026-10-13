@@ -1,6 +1,6 @@
 import type { ApiMessage, ContextCategory, On, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code'
 import { type Engine, describe, expect, test, tier } from 'claude-code/testing'
-import { chooseBranch, estimateAfter, thinkingTokensIn } from '../hooks/decide.ts'
+import { chooseBranch, droppedThinkingTokensIn, estimateAfter, thinkingTokensIn } from '../hooks/decide.ts'
 import { maskOldToolResults } from '../hooks/mask.ts'
 import { microLine, summaryLine } from '../hooks/lines.ts'
 
@@ -366,5 +366,25 @@ describe('the line', () => {
   test('summary falls back to the context size when core gives no tokensBefore', () => {
     const result = { messages: [SUMMARY], tokensAfter: 19_000 }
     expect(summaryLine({ when: at1841, outcome: undefined, result, contextTokens: 290_000, targetTokens: 150_000 }).status).toBe('summarized at 18:41: 290k → 19k summary')
+  })
+})
+
+describe('the dropped thinking', () => {
+  // 0.2745 × n − 274 tokens a block: 10706, 824 and 2471
+  const block = (n: number): ApiMessage => ({ role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 's'.repeat(n) }] })
+  const api = [block(40_000), block(4_000), block(10_000)]
+
+  test('is all the thinking when no thinking-only message is kept', () => {
+    expect(droppedThinkingTokensIn(api, [false, false, false])).toBe(thinkingTokensIn(api))
+  })
+
+  test("leaves out a kept message's block, lined up by order", () => {
+    expect(droppedThinkingTokensIn(api, [false, true, false])).toBe(10_706 + 2_471)
+    expect(droppedThinkingTokensIn(api, [true, false, false])).toBe(824 + 2_471)
+  })
+
+  test('when the blocks do not line up, leaves out the largest ones, one per kept message', () => {
+    expect(droppedThinkingTokensIn(api, [false, true])).toBe(824 + 2_471)
+    expect(droppedThinkingTokensIn(api, [true, true, false, false])).toBe(824)
   })
 })

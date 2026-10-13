@@ -16,16 +16,21 @@ import type { SessionAppendInput, SessionMessage } from 'claude-code'
 /** A main-conversation row: its uuid, and whether it is a report or queued message the host files beside a message. */
 type Row = { uuid: string; isReportOrQueued: boolean }
 
+// A subagent's report (`peer`), another session's SendMessage (`peer-send-message`), and the
+// person's own message through Remote Control (`bridge`). Any of them is kept when it is an
+// `isMeta` user row or a queued_command attachment delivered into a running turn.
+const MESSAGE_ORIGINS = new Set(['peer', 'peer-send-message', 'bridge'])
+
 /**
- * A subagent's report (`peer`: an `isMeta` user row, or a `queued_command` attachment when it
- * arrived mid-turn) or a user message queued while a turn ran (`composer`, a `queued_command`
- * attachment delivered into the turn). A typed prompt is a message of its own. The other rows filed
- * beside a message, task notifications among them, are re-sent by the host or stale.
+ * A message from another session, a subagent or Remote Control (MESSAGE_ORIGINS), or a user message
+ * typed while a turn ran (`composer`, a queued_command attachment delivered into the turn). A typed
+ * prompt is a message of its own. Rows of other origins filed beside a message (task
+ * notifications, scheduled prompts, relays, channel messages, the engine's reminders) are not kept.
  */
 export function isReportOrQueued({ door, origin, message }: SessionAppendInput): boolean {
-  const isQueuedCommand = message.type === 'attachment' && message.name === 'queued_command'
-  if (origin.kind === 'peer') return isQueuedCommand || (message.type === 'user' && message.isMeta === true)
-  if (origin.kind === 'composer') return isQueuedCommand && door === 'delivery'
+  const isDeliveredQueuedCommand = message.type === 'attachment' && message.name === 'queued_command' && door === 'delivery'
+  if (MESSAGE_ORIGINS.has(origin.kind)) return isDeliveredQueuedCommand || (message.type === 'user' && message.isMeta === true)
+  if (origin.kind === 'composer') return isDeliveredQueuedCommand
   return false
 }
 

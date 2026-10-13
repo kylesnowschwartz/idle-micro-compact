@@ -255,6 +255,13 @@ function isThinkingOnly(m: Msg): boolean {
   return m.role === 'assistant' && !m.text && m.toolUses.length === 0
 }
 
+const isKeptWhole = (m: Msg, keepWhole: ReadonlySet<string>) => m.handle !== undefined && keepWhole.has(m.handle)
+
+/** One entry per thinking-only message, in order: whether maskOldToolResults keeps it whole rather than dropping it. */
+export function thinkingKept(messages: readonly Msg[], keepWhole: ReadonlySet<string>): boolean[] {
+  return messages.filter(isThinkingOnly).map((m) => isKeptWhole(m, keepWhole))
+}
+
 /**
  * Masks the results of every tool use but the newest few and drops thinking. Old Read results
  * become a placeholder naming the file and line range; old command-style output keeps its first
@@ -273,9 +280,9 @@ export function maskOldToolResults(messages: readonly Msg[], keepWhole: Readonly
   const stats: MaskStats = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 }
   const out: Msg[] = []
   for (const m of messages) {
-    const isKeptWhole = m.handle !== undefined && keepWhole.has(m.handle)
+    const isKept = isKeptWhole(m, keepWhole)
     if (isThinkingOnly(m)) {
-      if (isKeptWhole) {
+      if (isKept) {
         stats.keptForRows++
         out.push(m)
       } else {
@@ -297,7 +304,7 @@ export function maskOldToolResults(messages: readonly Msg[], keepWhole: Readonly
       out.push(m)
       continue
     }
-    if (isKeptWhole) {
+    if (isKept) {
       stats.keptForRows++
       out.push(m)
       continue

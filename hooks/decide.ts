@@ -35,17 +35,36 @@ function thinkingTokensOf(block: ApiMessage['content'][number]) {
   return Math.max(0, THINKING_TOKENS_PER_SIGNATURE_CHAR * signature.length - THINKING_TOKENS_SUBTRACTED_PER_BLOCK)
 }
 
+/** Each thinking block's tokens, in conversation order. */
+function thinkingBlockTokens(messages: readonly ApiMessage[]): number[] {
+  return messages.flatMap((m) => m.content.filter((b) => b.type === 'thinking' || b.type === 'redacted_thinking').map(thinkingTokensOf))
+}
+
+const sum = (ns: readonly number[]) => ns.reduce((a, b) => a + b, 0)
+
 /**
  * The tokens of the thinking the conversation sends back with each request. The hook's message
  * list shows thinking as empty rows, so this reads it from the Messages API form, where each
- * thinking block keeps its signature. Dropping thinking-only messages removes all of it.
+ * thinking block keeps its signature.
  */
 export function thinkingTokensIn(messages: readonly ApiMessage[]) {
-  let n = 0
-  for (const m of messages) {
-    for (const block of m.content) if (block.type === 'thinking' || block.type === 'redacted_thinking') n += thinkingTokensOf(block)
-  }
-  return Math.round(n)
+  return Math.round(sum(thinkingBlockTokens(messages)))
+}
+
+/**
+ * The tokens of the thinking a trim drops. `isKept` has one entry per thinking-only message of the
+ * hook's list, in order: true for one the trim keeps whole. Each thinking-only message is one
+ * transcript row holding one block, so when the API view holds as many blocks as there are such
+ * messages, the nth block is the nth message's. When the counts differ the blocks can't be lined
+ * up, and the largest blocks, one per kept message, are left out: the count can then fall short,
+ * so the estimate errs high, never low.
+ */
+export function droppedThinkingTokensIn(messages: readonly ApiMessage[], isKept: readonly boolean[]) {
+  const blocks = thinkingBlockTokens(messages)
+  const keptCount = isKept.filter(Boolean).length
+  if (keptCount === 0) return Math.round(sum(blocks))
+  if (blocks.length === isKept.length) return Math.round(sum(blocks.filter((_, i) => !isKept[i])))
+  return Math.round(sum([...blocks].sort((a, b) => b - a).slice(keptCount)))
 }
 
 type EstimateInput = {
@@ -53,8 +72,7 @@ type EstimateInput = {
   conversationTokens: number
   original: readonly SessionMessage[]
   compacted: readonly SessionMessage[]
-  // the thinking the compaction drops, as thinkingTokensIn counts it. Masking drops every thinking
-  // block, so this is also all the thinking the conversation holds.
+  // the thinking the compaction drops, as droppedThinkingTokensIn counts it
   droppedThinkingTokens: number
   // the images and PDFs the compaction replaced with a placeholder
   maskedMedia: number
