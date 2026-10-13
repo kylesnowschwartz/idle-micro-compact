@@ -71,7 +71,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
   // duringRead: run once while the module reads `$.state`, to overtake a re-arm.
   // duringWrite: run once before a write to `$.state` lands, to overtake an arm.
   const seen = {
-    compacts: [] as string[], commands: [] as string[], logs: [] as string[], status: [] as (string | undefined)[], lateMs: 0, isCompacted: false,
+    compacts: [] as string[], commands: [] as string[], logs: [] as string[], debug: [] as string[], status: [] as (string | undefined)[], lateMs: 0, isCompacted: false,
     stored, duringRead: undefined as (() => Promise<unknown>) | undefined,
     duringUsage: undefined as (() => Promise<unknown>) | undefined,
     duringWrite: undefined as (() => Promise<unknown>) | undefined,
@@ -101,7 +101,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
     if (compact === 'skip') return { skip: 'nothing to compact' }
     return { messages: [SUMMARY], tokensBefore: tokens ?? undefined, tokensAfter: 12_000, usage }
   })
-  on('ui.log', (_$, e) => (seen.logs.push(e.text), { value: undefined }))
+  on('ui.log', (_$, e) => ((e.to === 'debug' ? seen.debug : seen.logs).push(e.text), { value: undefined }))
   on('ui.status', (_$, e) => (seen.status.push(e.text), { value: undefined }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
@@ -232,7 +232,8 @@ describe('reloading', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
-    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (nothing to trim)'])
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
+    expect(seen.debug).toEqual(['summary chosen: nothing to trim'])
   })
 
   test('a freshly loaded module re-arms from the stored turn', async ($, on) => {
@@ -243,7 +244,8 @@ describe('reloading', () => {
     await clock.advance(2)
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
-    expect(seen.logs).toEqual(['summarized at 18:20 after 50 min idle: 200k → 12k summary (nothing to trim)'])
+    expect(seen.logs).toEqual(['summarized at 18:20 after 50 min idle: 200k → 12k summary'])
+    expect(seen.debug).toEqual(['summary chosen: nothing to trim'])
   })
 
   test('a reload past the deadline does nothing and says nothing', async ($, on) => {
@@ -379,7 +381,8 @@ describe('when it fires', () => {
     await clock.advance(50 * MIN + 1)
     await clock.settle()
     const status = 'summarized at 18:50: 200k → 12k summary'
-    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (nothing to trim)'])
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
+    expect(seen.debug).toEqual(['summary chosen: nothing to trim'])
     expect(seen.status).toEqual([status])
     await turnStart($)
     expect(seen.status).toEqual([status, undefined])
@@ -391,7 +394,8 @@ describe('when it fires', () => {
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (nothing to trim; 99% read from cache)'])
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
+    expect(seen.debug).toEqual(['summary chosen: nothing to trim; summary request 99% cached'])
   })
 
   test('a timer that fires late, after the machine slept, does not compact and says why', async ($, on) => {
@@ -507,6 +511,7 @@ describe('choosing the branch', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
-    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (trimming would leave about 1k, over the 100 target)'])
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
+    expect(seen.debug).toEqual(['summary chosen: trim estimate 1k, target 100'])
   })
 })
