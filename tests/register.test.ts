@@ -495,7 +495,14 @@ describe('when it fires', () => {
   })
 
   test("a throw in the timer's hook still leaves the summary", async ($, on) => {
-    const broken = [{ role: 'user', text: 'x' } as unknown as SessionMessage]
+    // A tool call whose input can't be read as JSON makes the size estimate throw, after masking.
+    const input: Record<string, unknown> = { command: 'echo' }
+    input.self = input
+    const broken: SessionMessage[] = [
+      ...READ.slice(0, 3),
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'c1', tool: 'Bash', input }], handle: 'c1a' },
+      ...READ.slice(3),
+    ]
     const { clock, seen } = setup($, on, { transcript: broken })
     await turnDone($)
     await clock.advance(50 * MIN + 1)
@@ -503,6 +510,11 @@ describe('when it fires', () => {
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
     expect(seen.isCompacted).toBe(true)
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
+    expect(seen.debug.length).toBe(1)
+    expect(seen.debug[0]).toStartWith('session.compact hook failed, so core summarized: ')
+    expect(seen.debug[0]).toContain('cyclic')
+    expect(seen.status).toEqual(['summarized at 18:50: 200k → 12k summary'])
   })
 
   test('a rejected compaction says why, and the next turn re-arms', async ($, on) => {

@@ -1,4 +1,6 @@
-import type { EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionContextUsage, SessionMessage, Timer } from 'claude-code'
+import type {
+  EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionCompactResult, SessionContextUsage, SessionMessage, Timer,
+} from 'claude-code'
 import { chooseBranch, estimateAfter, removedAnything, thinkingTokensIn } from './decide.ts'
 import { type MaskStats, maskOldToolResults } from './mask.ts'
 import { type Outcome, type Trim, type When, approx, leftAloneLine, microLine, nothingLeftLine, summaryLine } from './lines.ts'
@@ -60,10 +62,12 @@ type Pending = { conversationTokens: number | undefined }
 
 /**
  * What the session.compact hook decided on this module's own compaction, for the line written after
- * it: the timer's outcome, or on /micro-compact's run a trim, nothing to take out, or a failure.
+ * it: the timer's outcome, or core's summary after the timer's hook failed; on /micro-compact's run
+ * a trim, nothing to take out, or a failure.
  */
 type Decision =
   | { kind: 'timer'; outcome: Outcome }
+  | { kind: 'summary-after-failure'; summary: SessionCompactResult; message: string }
   | { kind: 'trimmed'; trim: Trim }
   | { kind: 'nothing-left' }
   | { kind: 'failed'; message: string }
@@ -312,11 +316,31 @@ async function compactAndReport($: EngineInterface, state: State, { sizes, when,
   // A turn that started while the size was measured means the person is back: leave the conversation be.
   if (isOvertaken()) return
   const decision = await runOwnCompaction($, state, sizes.conversationTokens, instructions(when))
+  if (decision?.kind === 'summary-after-failure') {
+    reportSummaryAfterFailure($, state, { ...decision, when, contextTokens: sizes.contextTokens, settings, isOvertaken })
+    return
+  }
   if (decision?.kind !== 'timer') {
     $.ui.log(stoppedLine(decision, when))
     return
   }
   await report($, state, { outcome: decision.outcome, when, contextTokens: sizes.contextTokens, settings, isOvertaken })
+}
+
+type FailureReport = { summary: SessionCompactResult; message: string; when: When; contextTokens: number; settings: Settings; isOvertaken: () => boolean }
+
+/**
+ * The timer's hook failed and core wrote its summary instead: the summary's line, as for a summary
+ * the hook never decided on, and the error in the debug log for tuning the mod.
+ */
+function reportSummaryAfterFailure($: EngineInterface, state: State, { summary, message, when, contextTokens, settings, isOvertaken }: FailureReport) {
+  $.ui.log(`session.compact hook failed, so core summarized: ${message}`, { to: 'debug' })
+  // A summary a hook beneath vetoed has left its own notice.
+  if (summary.messages === undefined) return
+  const { status, log, debug } = summaryLine({ when, outcome: undefined, result: summary, contextTokens, targetTokens: settings.microTargetTokens })
+  $.ui.log(log)
+  if (debug) $.ui.log(debug, { to: 'debug' })
+  pinStatus($, state, status, isOvertaken)
 }
 
 type RequestReport = { decision: Decision | undefined; when: When; isOvertaken: () => boolean }
@@ -449,7 +473,7 @@ export const register: Register = (on, options) => {
     const conversationTokens =
       state.pending?.conversationTokens ?? conversationTokensOf((await $.session.usage({ breakdown: 'full' })).context)
     return conversationTokens === undefined ? next(e) : maskOrSummarize($, { e, next, conversationTokens, state, settings })
-  }).catch(($, e, next) => {
+  }).catch(async ($, e, next) => {
     // /micro-compact never summarizes: a throw leaves the conversation as it is, and its line says why.
     if (isRequestRun(e)) {
       const message = next.error.message ?? next.error.kind
@@ -457,7 +481,11 @@ export const register: Register = (on, options) => {
       return { skip: `idle-micro-compact could not trim: ${message}` }
     }
     // The timer's throw before deciding still leaves a compaction: core's summary, with the same instructions.
-    return next(e)
+    if (!isTimerRun(e)) return next(e)
+    const message = next.error.message ?? next.error.kind
+    const summary = await next(e)
+    state.decision = { kind: 'summary-after-failure', summary, message }
+    return summary
   })
 
   on('turn.start', async ($, e, next) => {
