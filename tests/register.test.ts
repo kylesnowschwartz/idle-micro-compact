@@ -38,7 +38,8 @@ type Setup = {
   tokens?: number | null
   /** The conversation (the breakdown's Messages row); null for no breakdown. 20k of system prompt and tools by default. */
   messages?: number | null
-  compact?: 'ok' | 'skip' | 'throw'
+  /** `stop`: /compact ends without raising session.compact, as when the person presses Esc. */
+  compact?: 'ok' | 'skip' | 'throw' | 'stop'
   usage?: ModelUsage
   /** What `$.state` holds at the start, as a reloaded module finds it. */
   stored?: Stored
@@ -93,6 +94,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
   on('command.run', { command: 'compact' }, async (_$, e) => {
     if (compact === 'throw') throw new Error('refused')
     seen.commands.push(e.args)
+    if (compact === 'stop') return { text: 'Compaction canceled' }
     const result = await (engine as any).session.compact({ trigger: 'manual', instructions: e.args, messages: transcript })
     if (result.messages) seen.isCompacted = true
     return { text: result.skip ?? 'Compacted' }
@@ -482,6 +484,27 @@ describe('when it fires', () => {
     expect(seen.status).toEqual([])
   })
 
+  test('a /compact that ends before its hook decides says so', async ($, on) => {
+    const { clock, seen } = setup($, on, { compact: 'stop' })
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.commands.length).toBe(1)
+    expect(seen.logs).toEqual(['not compacted at 18:50: the compaction stopped before the mod decided (cancelled?)'])
+    expect(seen.status).toEqual([])
+  })
+
+  test("a throw in the timer's hook still leaves the summary", async ($, on) => {
+    const broken = [{ role: 'user', text: 'x' } as unknown as SessionMessage]
+    const { clock, seen } = setup($, on, { transcript: broken })
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.compacts.length).toBe(1)
+    expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
+    expect(seen.isCompacted).toBe(true)
+  })
+
   test('a rejected compaction says why, and the next turn re-arms', async ($, on) => {
     const { clock, seen } = setup($, on, { compact: 'throw' })
     await turnDone($)
@@ -605,14 +628,13 @@ describe('/micro-compact', () => {
   test('is registered for the command menu', async ($, on) => {
     const { seen } = setup($, on)
     await reload($)
-    expect(seen.registered).toEqual([{ name: 'micro-compact', description: "Trim old tool results now, or summarize if trimming isn't enough" }])
+    expect(seen.registered).toEqual([{ name: 'micro-compact', description: 'Trim old tool results now, with no summary' }])
   })
 
   test('trims at once and says it ran by the command', async ($, on) => {
     const { clock, seen } = setup($, on, { tokens: 140_000, transcript: READ })
     await microCompact($, clock)
-    expect(seen.commands.length).toBe(1)
-    expect(seen.commands[0]).toStartWith('This idle compaction ran on request at 18:00, by /micro-compact. ')
+    expect(seen.commands).toEqual(['idle-micro-compact: trim on request'])
     expect(seen.compacts).toEqual([])
     expect(seen.logs).toEqual([
       'trimmed at 18:00 by /micro-compact: 120k → ~106k tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
@@ -628,33 +650,82 @@ describe('/micro-compact', () => {
     ])
   })
 
-  test('leaves the conversation alone when a trim would save under 10% of it', { options: { microTargetTokens: 1_000_000 } }, async ($, on) => {
+  test('trims a trim that saves under 10% of the conversation', async ($, on) => {
     const { clock, seen } = setup($, on, { tokens: 320_000, transcript: READ })
     await microCompact($, clock)
+    expect(seen.isCompacted).toBe(true)
+    expect(seen.compacts).toEqual([])
+    expect(seen.logs).toEqual([
+      'trimmed at 18:00 by /micro-compact: 300k → ~286k tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
+    ])
+  })
+
+  test('trims, with no summary, a conversation that stays over the target', { options: { microTargetTokens: 1_000 } }, async ($, on) => {
+    const { clock, seen } = setup($, on, { transcript: READ })
+    await microCompact($, clock)
+    expect(seen.isCompacted).toBe(true)
+    expect(seen.compacts).toEqual([])
+    expect(seen.logs).toEqual([
+      'trimmed at 18:00 by /micro-compact: 180k → ~166k tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
+    ])
+    expect(seen.debug).toEqual([])
+    expect(seen.status).toEqual(['trimmed at 18:00: 180k → ~166k tokens'])
+  })
+
+  test('with nothing to remove, leaves the conversation as it is and says it ran', async ($, on) => {
+    const { clock, seen } = setup($, on)
+    await microCompact($, clock)
+    expect(seen.commands.length).toBe(1)
+    expect(seen.compacts).toEqual([])
     expect(seen.isCompacted).toBe(false)
-    expect(seen.logs).toEqual(['not trimmed at 18:00 by /micro-compact: a trim would save ~14k of 300k tokens, under the 10% minimum'])
+    expect(seen.logs).toEqual([
+      'trimmed at 18:00 by /micro-compact: nothing left to remove (old tool results are already placeholders or among the 5 newest)',
+    ])
     expect(seen.status).toEqual([])
   })
 
-  test('writes the summary when the trim would land over the target', async ($, on) => {
-    const { clock, seen } = setup($, on)
+  test('a throw in its hook leaves the conversation as it is, with no summary, and says why', async ($, on) => {
+    const broken = [{ role: 'user', text: 'x' } as unknown as SessionMessage]
+    const { clock, seen } = setup($, on, { transcript: broken })
     await microCompact($, clock)
-    expect(seen.compacts.length).toBe(1)
-    expect(seen.compacts[0]).toStartWith('This idle compaction ran on request at 18:00, by /micro-compact. Open the summary by saying so.')
-    expect(seen.logs).toEqual(['summarized at 18:00 by /micro-compact: 200k → 12k summary'])
-    expect(seen.debug).toEqual(['summary chosen: trim estimate 180k, target 150k'])
-    expect(seen.status).toEqual(['summarized at 18:00: 200k → 12k summary'])
+    expect(seen.commands.length).toBe(1)
+    expect(seen.compacts).toEqual([])
+    expect(seen.isCompacted).toBe(false)
+    expect(seen.logs.length).toBe(1)
+    expect(seen.logs[0]).toStartWith('not compacted by /micro-compact: ')
+    expect(seen.logs[0]).toContain('m.toolUses')
+    expect(seen.status).toEqual([])
   })
 
-  test('an unknown size, as after a compaction, says so and runs nothing', async ($, on) => {
-    const { clock, seen } = setup($, on, { tokens: null })
+  test('an unknown size, as after a compaction, still trims, with the line left without sizes', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: null, transcript: READ })
     await microCompact($, clock)
-    expect(seen.commands).toEqual([])
-    expect(seen.logs).toEqual(["not compacted: the conversation's size is unknown until the next response, as after a compaction"])
+    expect(seen.commands.length).toBe(1)
+    expect(seen.isCompacted).toBe(true)
+    expect(seen.compacts).toEqual([])
+    expect(seen.logs).toEqual(['trimmed at 18:00 by /micro-compact (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)'])
+    expect(seen.status).toEqual(['trimmed at 18:00'])
+  })
+
+  test('runs again right after its own trim, while the size is unknown', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: READ })
+    await microCompact($, clock)
+    await microCompact($, clock)
+    expect(seen.commands.length).toBe(2)
+    expect(seen.logs[1]).toBe('trimmed at 18:00 by /micro-compact (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)')
+  })
+
+  test('a /compact that ends before its hook decides says so', async ($, on) => {
+    const { clock, seen } = setup($, on, { compact: 'stop', transcript: READ })
+    await microCompact($, clock)
+    expect(seen.commands.length).toBe(1)
+    expect(seen.logs).toEqual(['not compacted at 18:00: the compaction stopped before the mod decided (cancelled?)'])
+    expect(seen.status).toEqual([])
   })
 
   test('takes the place of the pending idle timer until the next turn', { options: { microTargetTokens: 1_000_000 } }, async ($, on) => {
-    const { clock, seen } = setup($, on, { tokens: 320_000, transcript: READ })
+    // Nothing to remove: the conversation's size stays known for the timer that comes after.
+    const { clock, seen } = setup($, on, { tokens: 320_000 })
     await turnDone($)
     await clock.advance(10 * MIN)
     await microCompact($, clock)

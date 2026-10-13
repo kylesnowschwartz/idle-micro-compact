@@ -2,7 +2,7 @@ import type { ApiMessage, ContextCategory, On, SessionCompactInput, SessionCompa
 import { type Engine, describe, expect, test, tier } from 'claude-code/testing'
 import { chooseBranch, estimateAfter, mediaTokens, thinkingTokensIn } from '../hooks/decide.ts'
 import { maskOldToolResults } from '../hooks/mask.ts'
-import { leftAloneLine, microLine, summaryLine } from '../hooks/lines.ts'
+import { leftAloneLine, microLine, nothingLeftLine, summaryLine } from '../hooks/lines.ts'
 
 tier('user')
 
@@ -377,6 +377,20 @@ describe('the line', () => {
   test('micro: small figures are shown as they are', () => {
     const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 120_000, estimate: 900, stats: { ...none, masked: 1 } }
     expect(microLine({ when, outcome }).status).toBe('trimmed at 18:50: 120k → ~900 tokens')
+  })
+
+  test('micro: with the size unknown, only what was taken out', () => {
+    const stats = { ...none, masked: 21, trimmedToHeadAndTail: 8, thinkingDropped: 66 }
+    expect(microLine({ when: { at: '14:50', command: 'micro-compact' }, outcome: { stats } })).toEqual({
+      status: 'trimmed at 14:50',
+      log: 'trimmed at 14:50 by /micro-compact (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)',
+    })
+  })
+
+  test('nothing left: says the trim ran and why it took nothing out', () => {
+    expect(nothingLeftLine({ at: '14:50', command: 'micro-compact' })).toBe(
+      'trimmed at 14:50 by /micro-compact: nothing left to remove (old tool results are already placeholders or among the 5 newest)',
+    )
   })
 
   const usage = { input_tokens: 1_500, output_tokens: 800, cache_read_input_tokens: 198_000, cache_creation_input_tokens: 500 }

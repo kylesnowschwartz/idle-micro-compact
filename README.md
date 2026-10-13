@@ -115,10 +115,16 @@ When the timer fires, the mod follows these steps:
 
 The automatic request appears in the transcript as a manual `/compact` line.
 
-Run `/micro-compact` to compact now instead of waiting for the timer:
+Run `/micro-compact` to trim now instead of waiting for the timer:
 
-- It follows the same steps, except the `minTokens` floor (step 2) and the cache deadline (step 3).
-- If the size is unknown, as right after a compaction, it writes a `not compacted:` line and stops.
+- It always masks old tool results and drops thinking, with no model call. It never writes a summary.
+- It ignores `minTokens`, `microTargetTokens`, `minSavedShare`, and the cache deadline. It trims
+  however large the conversation is and however little the trim saves.
+- It also runs when the size is unknown, as right after a compaction. Its line then leaves out the
+  sizes.
+- It appears in the transcript as `/compact idle-micro-compact: trim on request`.
+- When there is nothing left to mask, it leaves the conversation unchanged and writes
+  `trimmed at 14:52 by /micro-compact: nothing left to remove (old tool results are already placeholders or among the 5 newest)`.
 - Typed during a turn, it runs when the turn ends.
 - It cancels the idle timer. The next turn starts a new one.
 
@@ -174,8 +180,12 @@ summarized at 18:41: 285k → 19k summary
 - `not trimmed at` appears when masking would save less than `minSavedShare`, as in
   `not trimmed at 11:04 after 1 min idle: a trim would save ~0 of 44k tokens, under the 10% minimum`.
   It does not set a status.
-- `not compacted:` appears for a known-small or late conversation, a failed compaction, or an
-  unknown size after `/micro-compact`. It does not set a status.
+- `not compacted:` appears for a known-small or late conversation, or a failed compaction. It does
+  not set a status. `not compacted by /micro-compact:` gives the error that stopped a
+  `/micro-compact` trim.
+- `not compacted: the compaction was cancelled` appears when you press Esc while the compaction
+  runs. When the mod can't tell why a compaction stopped, it writes
+  `not compacted at 14:52: the compaction stopped before the mod decided (cancelled?)`.
 
 The timer writes no line if the size is unknown, a turn overtakes it, or Claude Code skips
 compaction.

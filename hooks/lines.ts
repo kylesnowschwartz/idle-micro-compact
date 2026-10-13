@@ -40,9 +40,15 @@ function whyNotMicro(outcome: Outcome | undefined, targetTokens: number) {
   return `trim estimate ${approx(outcome.estimate)}, target ${approx(targetTokens)}`
 }
 
-type MicroLineInput = { when: When; outcome: Outcome }
+/**
+ * What a trim took out, with the conversation's size before it and the estimate after it. The
+ * sizes are absent when the size before was unknown, as right after a compaction.
+ */
+export type Trim = { stats: MaskStats; conversationTokens?: number; estimate?: number }
 
-/** The micro branch: the conversation before, the estimate after, and what was taken out. */
+type MicroLineInput = { when: When; outcome: Trim }
+
+/** The micro branch: the conversation before and the estimate after, when known, and what was taken out. */
 export function microLine({ when, outcome }: MicroLineInput): Lines {
   const { masked, trimmedToHeadAndTail, errorsCutToStart, thinkingDropped } = outcome.stats
   const removed = [
@@ -52,9 +58,17 @@ export function microLine({ when, outcome }: MicroLineInput): Lines {
     ...(errorsCutToStart ? [plural(errorsCutToStart, 'error cut to its start', 'errors cut to their start')] : []),
     plural(thinkingDropped, 'thinking block dropped', 'thinking blocks dropped'),
   ].join(', ')
-  const sizes = `${approx(outcome.conversationTokens)} → ~${approx(outcome.estimate)} tokens`
+  const { conversationTokens, estimate } = outcome
+  if (conversationTokens === undefined || estimate === undefined) {
+    return { status: `trimmed at ${when.at}`, log: `trimmed at ${when.at} ${cause(when)} (${removed})` }
+  }
+  const sizes = `${approx(conversationTokens)} → ~${approx(estimate)} tokens`
   return { status: `trimmed at ${when.at}: ${sizes}`, log: `trimmed at ${when.at} ${cause(when)}: ${sizes} (${removed})` }
 }
+
+/** A trim that found nothing to take out, so the transcript stays as it is. */
+export const nothingLeftLine = (when: When) =>
+  `trimmed at ${when.at} ${cause(when)}: nothing left to remove (old tool results are already placeholders or among the 5 newest)`
 
 // A share as a percentage, to a tenth at most: 0.1 is "10%", 0.025 is "2.5%".
 const percent = (share: number) => `${Number((share * 100).toFixed(1))}%`

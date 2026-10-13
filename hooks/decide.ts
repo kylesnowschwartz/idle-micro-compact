@@ -108,6 +108,10 @@ export type BranchLimits = {
 
 type BranchInput = { conversationTokens: number; estimate: number; stats: MaskStats }
 
+/** Whether masking took anything out: a result masked, shortened or cut, or thinking dropped. */
+export const removedAnything = (stats: MaskStats) =>
+  stats.masked + stats.trimmedToHeadAndTail + stats.errorsCutToStart + stats.thinkingDropped > 0
+
 /**
  * The summary when the trim is estimated to land over the target, whatever it saves. Under it, the
  * conversation is left alone when the trim removes nothing or saves less than `minSavedShare` of
@@ -116,8 +120,7 @@ type BranchInput = { conversationTokens: number; estimate: number; stats: MaskSt
  */
 export function chooseBranch({ conversationTokens, estimate, stats }: BranchInput, limits: BranchLimits): Branch {
   if (estimate > limits.microTargetTokens) return { kind: 'summary' }
-  const changed = stats.masked + stats.trimmedToHeadAndTail + stats.errorsCutToStart + stats.thinkingDropped
   const saved = conversationTokens - estimate
-  if (changed === 0 || saved < limits.minSavedShare * conversationTokens) return { kind: 'leave-alone' }
+  if (!removedAnything(stats) || saved < limits.minSavedShare * conversationTokens) return { kind: 'leave-alone' }
   return { kind: 'micro' }
 }
