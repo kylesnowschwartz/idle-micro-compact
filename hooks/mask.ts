@@ -5,12 +5,15 @@
 // this mod's.
 
 import type { SessionMessage as Msg, ToolResultSummary, ToolUseSummary } from 'claude-code'
+import { type MediaSize, mediaTokens } from './decide.ts'
 
 export type MaskStats = {
   /** Tool results replaced by a one-line placeholder */
   masked: number
   /** Of the masked results, the images and PDFs */
   mediaMasked: number
+  /** What those images and PDFs cost, in tokens, as mediaTokens counts them */
+  mediaTokens: number
   /** Command-style results cut to their first and last lines */
   trimmedToHeadAndTail: number
   /** Error results cut to their start */
@@ -93,12 +96,22 @@ function describeText(input: Record<string, unknown>, text: string): string {
   return `[file contents${MARKER}${pathOf(input)}${range}${AGAIN}`
 }
 
+const isPositive = (n: unknown): n is number => typeof n === 'number' && n > 0
+
+/** An image's size as the model was sent it: its size after the Read resized it, or its original size. */
+function sentSize(d: any): MediaSize {
+  if (isPositive(d?.displayWidth) && isPositive(d?.displayHeight)) return { width: d.displayWidth, height: d.displayHeight }
+  if (isPositive(d?.originalWidth) && isPositive(d?.originalHeight)) return { width: d.originalWidth, height: d.originalHeight }
+  return undefined
+}
+
 /**
  * The placeholder for a Read whose bulk is an image or document block rather than text
- * (`result.type` image, pdf, or parts: PDF pages rendered as images), or null for any other.
- * Their `text` is empty or a one-line note, so length says nothing about their size.
+ * (`result.type` image, pdf, or parts: PDF pages rendered as images), and the tokens the block
+ * costs; null for any other. Their `text` is empty or a one-line note, so length says nothing
+ * about their size.
  */
-function describeMedia(input: Record<string, unknown>, result: unknown): string | null {
+function describeMedia(input: Record<string, unknown>, result: unknown): { text: string; tokens: number } | null {
   if (!result || typeof result !== 'object') return null
   const r = result as { type?: unknown; file?: any; firstPage?: unknown }
   const path = pathOf(input)
@@ -106,16 +119,16 @@ function describeMedia(input: Record<string, unknown>, result: unknown): string 
     case 'image': {
       const d = r.file?.dimensions
       const size = d?.originalWidth && d?.originalHeight ? `, ${d.originalWidth}x${d.originalHeight}` : ''
-      return `[image${MARKER}${path}${size}${AGAIN}`
+      return { text: `[image${MARKER}${path}${size}${AGAIN}`, tokens: mediaTokens(sentSize(d)) }
     }
     case 'pdf':
-      return `[PDF${MARKER}${path}${AGAIN}`
+      return { text: `[PDF${MARKER}${path}${AGAIN}`, tokens: mediaTokens(undefined) }
     case 'parts': {
       const first = typeof r.firstPage === 'number' ? r.firstPage : null
       const count = typeof r.file?.count === 'number' ? r.file.count : null
       const pages =
         typeof input.pages === 'string' ? input.pages : first !== null && count !== null ? `${first}-${first + count - 1}` : null
-      return `[PDF pages${MARKER}${path}${pages ? `, pages ${pages}` : ''}${AGAIN}`
+      return { text: `[PDF pages${MARKER}${path}${pages ? `, pages ${pages}` : ''}${AGAIN}`, tokens: mediaTokens(undefined) }
     }
     default:
       return null
@@ -212,7 +225,8 @@ function errorStart(text: string): string | null {
   return `${text.slice(0, ERROR_START_CHARS)}\n${withPaths(marker, removed)}`
 }
 
-type Replacement = { text: string; kind: 'masked' | 'trimmedToHeadAndTail' | 'errorsCutToStart'; isMedia?: true }
+// `mediaTokens` is set on the placeholder of an image or PDF: what the block it replaces costs.
+type Replacement = { text: string; kind: 'masked' | 'trimmedToHeadAndTail' | 'errorsCutToStart'; mediaTokens?: number }
 
 /** What an old result of a masked tool becomes before the length check, or null to keep it whole. */
 function shortenedText(use: ToolUseSummary, r: ToolResultSummary): Replacement | null {
@@ -231,7 +245,7 @@ function shortenedText(use: ToolUseSummary, r: ToolResultSummary): Replacement |
 function replacementFor(use: ToolUseSummary, r: ToolResultSummary): Replacement | null {
   // An image or PDF's bulk is a block its text doesn't show, so its placeholder always saves.
   const media = use.tool === 'Read' && !r.isError ? describeMedia(use.input, r.result) : null
-  if (media !== null) return { text: media, kind: 'masked', isMedia: true }
+  if (media !== null) return { text: media.text, kind: 'masked', mediaTokens: media.tokens }
   const replacement = shortenedText(use, r)
   // Already short (an "unchanged since last read" stub, a tiny file, a short error)
   return replacement !== null && replacement.text.length < r.text.length ? replacement : null
@@ -277,7 +291,7 @@ export function maskOldToolResults(messages: readonly Msg[], keepWhole: Readonly
   for (const m of messages) for (const u of m.toolUses) uses.set(u.tool_use_id, u)
   const recent = recentToolUses(messages)
 
-  const stats: MaskStats = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 }
+  const stats: MaskStats = { masked: 0, mediaMasked: 0, mediaTokens: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 }
   const out: Msg[] = []
   for (const m of messages) {
     const isKept = isKeptWhole(m, keepWhole)
@@ -311,7 +325,10 @@ export function maskOldToolResults(messages: readonly Msg[], keepWhole: Readonly
     }
     for (const replacement of replacements) {
       stats[replacement.kind]++
-      if (replacement.isMedia) stats.mediaMasked++
+      if (replacement.mediaTokens !== undefined) {
+        stats.mediaMasked++
+        stats.mediaTokens += replacement.mediaTokens
+      }
     }
     const { handle: _, ...rest } = m
     out.push({ ...rest, toolResults })

@@ -155,6 +155,9 @@ summarized at 18:41: 285k → 19k summary
   mod. It holds why trimming wasn't enough (`nothing to trim`, or `trim estimate 200k, target 150k`)
   and the share of the summary request input read from cache (`summary request 99% cached`). Each
   part is left out when unknown, and the line is omitted when both are.
+- A trimmed compaction writes one debug-log line, `trim kept 2 messages whole for the reports or
+  queued messages they carry`, when it kept any message whole for a report or queued message it
+  carries. The line is omitted when there are none.
 - `not compacted:` appears for a known-small or late conversation, or a failed compaction. It does
   not set a status.
 
@@ -163,7 +166,8 @@ No line appears if the size is unknown, a turn overtakes the timer, or Claude Co
 ## Caveats
 
 - **The estimate tends to be high.** It subtracts removed tool output, dropped thinking, and masked
-  images and PDFs at fixed token rates for Opus 5.5. It does not count attachments Claude Code drops
+  images and PDFs at fixed token rates for Opus 5.5. An image counts by its size, up to 1,600
+  tokens. A PDF counts 1,000. It does not count attachments Claude Code drops
   with a rewritten message, or images inside MCP tool results. A conversation near
   `microTargetTokens` may get a summary when trimming would have been enough.
 - **Micro-compaction rewrites the transcript from the first changed message.** The next request
@@ -171,10 +175,11 @@ No line appears if the size is unknown, a turn overtakes the timer, or Claude Co
   not free.
 - **Masked output is removed from context.** The replacement names what Claude can read or rerun,
   but the removed content itself is unavailable.
-- **Subagent reports and queued messages survive a trim only if they arrived since the last
-  compaction.** The trim keeps a message whole when it carries a subagent's report, another
-  session's message, a Remote Control message, or a message you queued while Claude was working.
-  It can only tell for rows that arrived since the last compaction, session start, or plugin reload.
+- **Subagent reports and queued messages survive only this mod's trims.** The trim keeps a message
+  whole when it carries a subagent's report, another session's message, a Remote Control or Slack
+  message, or a message you queued while Claude was working. Later trims keep that message whole
+  too. A summary, your own `/compact`, auto-compaction, a session start, or a plugin reload ends
+  this. After one, only messages that arrive later are kept.
 - **The timing assumes a 1-hour cache.** With a 5-minute cache, the default timer fires after the
   cache is cold.
 

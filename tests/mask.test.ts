@@ -39,7 +39,7 @@ describe('the window', () => {
     const { messages, stats } = maskOldToolResults(transcript)
     expect(textOf(messages, 'a0')).toBe('[file contents elided by compaction: /src/a.ts, 300 lines. Read it again if needed.]')
     for (const i of [1, 2, 3, 4, 5]) expect(messages.find((m) => m.handle === `ku${i}`)).toBe(transcript[2 * i + 1])
-    expect(stats).toEqual({ masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 })
+    expect(stats).toEqual({ masked: 1, mediaMasked: 0, mediaTokens: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 })
   })
 
   test('the window counts only masked tools: calls to other tools do not push a result out', () => {
@@ -105,7 +105,7 @@ describe('head and tail', () => {
     const transcript = [call('g1', 'Grep', { pattern: 'TODO', path: '/w' }, 'a1'), result('g1', lines(34, 'match line'), 'u1'), ...recentFive()]
     const { messages, stats } = maskOldToolResults(transcript)
     expect(textOf(messages, 'a1')).toBe('[search results elided by compaction: TODO in /w, 34 lines. Rerun it if needed.]')
-    expect(stats).toEqual({ masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 })
+    expect(stats).toEqual({ masked: 1, mediaMasked: 0, mediaTokens: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 })
   })
 
   test('a head cut inside a long line keeps its start and marks the cut', () => {
@@ -222,7 +222,7 @@ describe('the pass', () => {
 
   test('drops thinking-only messages and keeps everything else in order', () => {
     const { messages, stats } = maskOldToolResults(transcript)
-    expect(stats).toEqual({ masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 1, errorsCutToStart: 1, thinkingDropped: 2, keptForRows: 0 })
+    expect(stats).toEqual({ masked: 1, mediaMasked: 0, mediaTokens: 0, trimmedToHeadAndTail: 1, errorsCutToStart: 1, thinkingDropped: 2, keptForRows: 0 })
     expect(messages.length).toBe(transcript.length - 2)
     expect(messages.map((m) => m.handle).slice(0, 7)).toEqual(['u0', 'a1', undefined, 'a2', undefined, 'a3', undefined])
   })
@@ -237,7 +237,7 @@ describe('the pass', () => {
     const once = maskOldToolResults(transcript).messages
     const twice = maskOldToolResults(once)
     expect(twice.messages).toEqual(once)
-    expect(twice.stats).toEqual({ masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 })
+    expect(twice.stats).toEqual({ masked: 0, mediaMasked: 0, mediaTokens: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 })
   })
 })
 
@@ -256,7 +256,7 @@ describe('messages kept whole', () => {
     const { messages, stats } = maskOldToolResults(transcript, new Set(['u1']))
     expect(messages.find((m) => m.handle === 'u1')).toBe(transcript[1])
     expect(textOf(messages, 'a2')).toBe('[file contents elided by compaction: /src/b.ts, 300 lines. Read it again if needed.]')
-    expect(stats).toEqual({ masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 2, keptForRows: 1 })
+    expect(stats).toEqual({ masked: 1, mediaMasked: 0, mediaTokens: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 2, keptForRows: 1 })
   })
 
   test('a thinking-only message kept whole is not dropped', () => {

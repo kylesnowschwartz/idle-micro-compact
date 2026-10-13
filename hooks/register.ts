@@ -1,5 +1,5 @@
 import type { EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionContextUsage, Timer } from 'claude-code'
-import { type AppendedRows, appendedRows } from './carried.ts'
+import { type CarrierTracker, carrierTracker } from './carried.ts'
 import { chooseBranch, droppedThinkingTokensIn, estimateAfter } from './decide.ts'
 import { maskOldToolResults, thinkingKept } from './mask.ts'
 import { type Outcome, type When, approx, microLine, summaryLine } from './lines.ts'
@@ -151,7 +151,7 @@ type Compaction = {
   conversationTokens: number
   state: State
   settings: Settings
-  rows: AppendedRows
+  tracker: CarrierTracker
 }
 
 /**
@@ -159,17 +159,18 @@ type Compaction = {
  * call down to core's summary otherwise. `conversationTokens` is the Messages row just before the
  * call: the event carries the transcript but not its size.
  */
-async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens, state, settings, rows }: Compaction) {
-  const carriers = rows.carriers(e.messages)
+async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens, state, settings, tracker }: Compaction) {
+  const carriers = tracker.carriers(e.messages)
   const { messages, stats } = maskOldToolResults(e.messages, carriers)
   // With no thinking-only message dropped, no thinking counts.
   const droppedThinking = stats.thinkingDropped ? await droppedThinkingTokens($, thinkingKept(e.messages, carriers)) : 0
   const estimate = estimateAfter({
-    conversationTokens, original: e.messages, compacted: messages, droppedThinkingTokens: droppedThinking, maskedMedia: stats.mediaMasked,
+    conversationTokens, original: e.messages, compacted: messages, droppedThinkingTokens: droppedThinking, maskedMediaTokens: stats.mediaTokens,
   })
   const branch = chooseBranch(estimate, settings.microTargetTokens, stats)
   if (branch.kind === 'micro') {
     state.outcome = { branch, conversationTokens, estimate, stats }
+    tracker.trimKeeps(e.messages, carriers)
     return { messages, tokensBefore: conversationTokens, tokensAfter: estimate }
   }
   const summary = await next(e)
@@ -291,21 +292,27 @@ export const register: Register = (on, options) => {
   // A reloaded module can't tell whether the one before it pinned a status: assume it did.
   const state: State = { generation: 0, hasStatus: true }
   // Starts empty on every load, so a reloaded or resumed session protects nothing it did not see arrive.
-  const rows = appendedRows()
+  const tracker = carrierTracker()
 
   // Records each row as it arrives, unchanged, so a trim knows which messages carry a subagent's
   // report or a queued user message.
   on('session.append', async ($, e, next) => {
-    rows.record(e)
+    tracker.record(e)
     return next(e)
   })
 
   // Registered before the idle compaction's hook, so it stands above it and sees every compaction
-  // that stands, this module's own trim included. Each one gives every message a new handle.
+  // of the main conversation end, this module's own trim included. A precompute installs nothing.
   on('session.compact', async ($, e, next) => {
-    const result = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages !== undefined) rows.clear()
-    return result
+    if (e.agentId !== undefined || e.trigger === 'precompute') return next(e)
+    let stood = false
+    try {
+      const result = await next(e)
+      stood = result.messages !== undefined
+      return result
+    } finally {
+      tracker.compactionEnded(stood)
+    }
   })
 
   // Only this module's idle compaction, which arrives as a /compact with its instructions: the
@@ -315,7 +322,7 @@ export const register: Register = (on, options) => {
     // Raised by someone other than this module's timer, which measured nothing: measure now.
     const conversationTokens =
       state.pending?.conversationTokens ?? conversationTokensOf((await $.session.usage({ breakdown: 'full' })).context)
-    return conversationTokens === undefined ? next(e) : maskOrSummarize($, { e, next, conversationTokens, state, settings, rows })
+    return conversationTokens === undefined ? next(e) : maskOrSummarize($, { e, next, conversationTokens, state, settings, tracker })
   }).catch(($, e, next) => {
     // A throw before deciding still leaves a compaction: core's summary, with the same instructions.
     return next(e)
@@ -337,9 +344,9 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  // A /clear starts a new conversation with no session.start, so its rows start over here.
+  // A /clear starts a new conversation with no session.start, so what the tracker knows starts over here.
   on('session.end', async ($, e, next) => {
-    rows.clear()
+    tracker.forget()
     disarm(state)
     clearStatus($, state)
     await forget($)
@@ -349,7 +356,7 @@ export const register: Register = (on, options) => {
   // Also fires when the module is reloaded (/reload-plugins, an update, an options change), which
   // cancels the timer: pick up where the last turn left off.
   on('session.start', async ($, e, next) => {
-    rows.clear()
+    tracker.forget()
     const result = await next(e)
     await rearm($, state, settings).catch(() => {})
     return result

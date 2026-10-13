@@ -155,7 +155,7 @@ if [[ $drive == false ]]; then
   echo "  $PROMPT"
   echo
   echo "About a minute after the turn ends, look for a line containing \"idle-micro-compact: $expected\"."
-  [[ $mode == summary ]] && echo "(without the micro- prefix)"
+  [[ $mode == summary ]] && echo "(the summary is a model call: the \"summarized at\" line can take a little longer)"
   exit 0
 fi
 

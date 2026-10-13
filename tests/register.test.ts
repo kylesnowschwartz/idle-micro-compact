@@ -2,6 +2,7 @@ import type {
   ContextCategory, ContextCategoryKind, ModelUsage, On, SessionAppendInput, SessionContextBreakdown, SessionMessage, TurnCompleteInput,
 } from 'claude-code'
 import { type Engine, describe, expect, mock, test, tier } from 'claude-code/testing'
+import { carrierTracker } from '../hooks/carried.ts'
 import { estimateAfter } from '../hooks/decide.ts'
 import { approx } from '../hooks/lines.ts'
 
@@ -78,6 +79,8 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
     compacts: [] as string[], commands: [] as string[], logs: [] as string[], debug: [] as string[], status: [] as (string | undefined)[], lateMs: 0, isCompacted: false,
     // what the last /compact installed
     installed: undefined as readonly SessionMessage[] | undefined,
+    // what the next /compact compacts
+    transcript,
     stored, duringRead: undefined as (() => Promise<unknown>) | undefined,
     duringUsage: undefined as (() => Promise<unknown>) | undefined,
     duringWrite: undefined as (() => Promise<unknown>) | undefined,
@@ -98,7 +101,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
   on('command.run', { command: 'compact' }, async (_$, e) => {
     if (compact === 'throw') throw new Error('refused')
     seen.commands.push(e.args)
-    const result = await (engine as any).session.compact({ trigger: 'manual', instructions: e.args, messages: transcript })
+    const result = await (engine as any).session.compact({ trigger: 'manual', instructions: e.args, messages: seen.transcript })
     if (result.messages) seen.isCompacted = true
     seen.installed = result.messages
     return { text: result.skip ?? 'Compacted' }
@@ -559,6 +562,8 @@ const ROW_KINDS = {
   sendMessage: { door: 'prompt', origin: { kind: 'peer-send-message' }, type: 'user', isMeta: true },
   queuedBridgeMessage: { door: 'delivery', origin: { kind: 'bridge' }, type: 'attachment', name: 'queued_command' },
   bridgeMessage: { door: 'prompt', origin: { kind: 'bridge' }, type: 'user', isMeta: true },
+  queuedSlackPing: { door: 'delivery', origin: { kind: 'slack-ping' }, type: 'attachment', name: 'queued_command' },
+  slackPing: { door: 'prompt', origin: { kind: 'slack-ping' }, type: 'user', isMeta: true },
   queuedScheduledPrompt: { door: 'delivery', origin: { kind: 'scheduled-trigger' }, type: 'attachment', name: 'queued_command' },
   scheduledPrompt: { door: 'prompt', origin: { kind: 'scheduled-trigger' }, type: 'user', isMeta: true },
 } satisfies Record<string, Row>
@@ -630,7 +635,7 @@ describe('messages that carry reports or queued messages', () => {
     expect(keptWhole(seen, 'u2')).toBe(false)
   })
 
-  for (const kind of ['queuedSendMessage', 'sendMessage', 'queuedBridgeMessage', 'bridgeMessage'] as const) {
+  for (const kind of ['queuedSendMessage', 'sendMessage', 'queuedBridgeMessage', 'bridgeMessage', 'queuedSlackPing', 'slackPing'] as const) {
     test(`a ${kind} row keeps the message before it whole`, async ($, on) => {
       const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
       await appendTwoReads($, [() => append($, 'h1', kind)])
@@ -668,7 +673,7 @@ describe('messages that carry reports or queued messages', () => {
     await idle($, clock)
     expect(seen.installed?.map((m) => m.handle)).toContain('t1')
     expect(seen.installed?.map((m) => m.handle)).not.toContain('t2')
-    const after = estimateAfter({ conversationTokens: 120_000, original: transcript, compacted: seen.installed!, droppedThinkingTokens: 824, maskedMedia: 0 })
+    const after = estimateAfter({ conversationTokens: 120_000, original: transcript, compacted: seen.installed!, droppedThinkingTokens: 824, maskedMediaTokens: 0 })
     expect(approx(after)).not.toBe(approx(after - 10_706))
     expect(seen.status).toEqual([`trimmed at 18:50: 120k → about ${approx(after)} tokens`])
     expect(seen.debug).toEqual([KEPT_ONE])
@@ -721,16 +726,66 @@ describe('messages that carry reports or queued messages', () => {
     expect(seen.debug).toEqual([])
   })
 
-  test("the module's own trim forgets the rows before it", async ($, on) => {
+  /**
+   * The conversation after the first trim as the next compaction sees it: every message with a new
+   * handle, no rows appended since, and two more long Reads that have fallen out of the recent window.
+   */
+  const afterTrim = (installed: readonly SessionMessage[]): SessionMessage[] => [
+    ...installed.map((m, i) => ({ ...m, handle: `n${i}` })),
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r3', tool: 'Read', input: { file_path: '/src/c.ts' } }], handle: 'a3' },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r3', text: numbered(1, 1000), isError: false }], handle: 'u3' },
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r4', tool: 'Read', input: { file_path: '/src/d.ts' } }], handle: 'a4' },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r4', text: numbered(1, 1000), isError: false }], handle: 'u4' },
+    ...[1, 2, 3, 4, 5].flatMap((i): SessionMessage[] => [
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: `c${i}`, tool: 'Bash', input: { command: `echo ${i}` } }], handle: `ca${i}` },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: `c${i}`, text: `${i}`, isError: false }], handle: `cu${i}` },
+    ]),
+  ]
+
+  test('a report survives two trims in a row, though the second sees new handles and no rows', async ($, on) => {
     const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
     await appendTwoReads($, [() => append($, 'h1', 'report')])
     await idle($, clock)
-    expect(seen.debug).toEqual([KEPT_ONE])
+    expect(keptWhole(seen, 'u1')).toBe(true)
+    const second = afterTrim(seen.installed!)
+    seen.transcript = second
     seen.isCompacted = false
     await idle($, clock)
-    expect(keptWhole(seen, 'u1')).toBe(false)
+    const carrier = second.find((m) => m.toolResults?.[0]?.tool_use_id === 'r1')!
+    expect(seen.installed?.find((m) => m.handle === carrier.handle)).toEqual(carrier)
+    expect(resultText(seen, 'r3')).toStartWith('[file contents elided by compaction: /src/c.ts')
+    expect(seen.debug).toEqual([KEPT_ONE, KEPT_ONE])
+  })
+
+  test('a summary between two trims clears what the first trim kept', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report')])
+    await idle($, clock)
+    const second = afterTrim(seen.installed!)
+    // The person's own /compact: core's summary, beneath every hook of the module.
+    await ($ as any).session.compact({ trigger: 'manual', instructions: 'the plan', messages: second })
+    seen.transcript = second
+    seen.isCompacted = false
+    await idle($, clock)
     expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
     expect(seen.debug).toEqual([KEPT_ONE])
+  })
+
+  test('a report that arrives after a trim is found from its rows, beside what the trim kept', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report')])
+    await idle($, clock)
+    const second = afterTrim(seen.installed!)
+    await append($, 'a3', 'response')
+    await append($, 'u3', 'toolResult')
+    await append($, 'h2', 'queuedMessage')
+    seen.transcript = second
+    seen.isCompacted = false
+    await idle($, clock)
+    expect(resultText(seen, 'r1') === numbered(1, 1000)).toBe(true)
+    expect(resultText(seen, 'r3') === numbered(1, 1000)).toBe(true)
+    expect(resultText(seen, 'r4')).toStartWith('[file contents elided by compaction: /src/d.ts')
+    expect(seen.debug).toEqual([KEPT_ONE, 'trim kept 2 messages whole for the reports or queued messages they carry'])
   })
 
   test('a precompute, which installs nothing, keeps the rows', async ($, on) => {
@@ -768,5 +823,72 @@ describe('messages that carry reports or queued messages', () => {
       ['h1', 'prompt', 'peer', 'user', [{ type: 'text', text: 'h1' }]],
       ['h2', 'delivery', 'composer', 'attachment', [{ type: 'text', text: 'h2' }]],
     ])
+  })
+})
+
+describe('the carriers a trim kept', () => {
+  const report = { door: 'prompt', origin: { kind: 'peer' }, uuid: 'h1', message: { type: 'user', role: 'user', isMeta: true, content: [] } } as SessionAppendInput
+  const row = (uuid: string) => ({ door: 'response', origin: { kind: 'model', model: 'm' }, uuid, message: { type: 'assistant', role: 'assistant', content: [] } }) as SessionAppendInput
+
+  /** A tracker that saw `carrier` carry a report, and a trim of `messages` that kept it whole and stood. */
+  function trimmedOnce(messages: SessionMessage[], carrier: string) {
+    const tracker = carrierTracker()
+    for (const m of messages) tracker.record(row(m.handle!))
+    tracker.record(report)
+    const carriers = tracker.carriers(messages)
+    expect([...carriers]).toEqual([carrier])
+    tracker.trimKeeps(messages, carriers)
+    tracker.compactionEnded(true)
+    return tracker
+  }
+
+  test('a plain-text carrier is matched by its role and text', () => {
+    const before: SessionMessage[] = [
+      { role: 'user', text: 'go', toolUses: [], handle: 'u0' },
+      { role: 'assistant', text: 'The subagent is running.', toolUses: [], handle: 'a0' },
+    ]
+    const tracker = trimmedOnce(before, 'a0')
+    const after: SessionMessage[] = [
+      { role: 'user', text: 'go', toolUses: [], handle: 'x0' },
+      { role: 'assistant', text: 'The subagent is running.', toolUses: [], handle: 'x1' },
+      { role: 'user', text: 'The subagent is running.', toolUses: [], handle: 'x2' },
+      { role: 'assistant', text: 'Something else.', toolUses: [], handle: 'x3' },
+    ]
+    expect([...tracker.carriers(after)]).toEqual(['x1'])
+  })
+
+  test('a carrier with tool ids is matched by them, whatever its text becomes', () => {
+    const before: SessionMessage[] = [
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 't1', tool: 'Bash', input: {} }], handle: 'a0' },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't1', text: 'out', isError: false }], handle: 'u0' },
+    ]
+    const tracker = trimmedOnce(before, 'u0')
+    const after: SessionMessage[] = [
+      { ...before[0]!, handle: 'x0' },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't1', text: 'other', isError: false }], handle: 'x1' },
+    ]
+    expect([...tracker.carriers(after)]).toEqual(['x1'])
+  })
+
+  test('a thinking-only carrier has nothing to be matched by', () => {
+    const before: SessionMessage[] = [{ role: 'assistant', text: '', toolUses: [], handle: 't0' }]
+    const tracker = trimmedOnce(before, 't0')
+    expect([...tracker.carriers([{ role: 'assistant', text: '', toolUses: [], handle: 'x0' }])]).toEqual([])
+  })
+
+  test('a carrier gone from the conversation is not remembered past the next trim', () => {
+    const before: SessionMessage[] = [{ role: 'assistant', text: 'running', toolUses: [], handle: 'a0' }]
+    const tracker = trimmedOnce(before, 'a0')
+    const without: SessionMessage[] = [{ role: 'assistant', text: 'other', toolUses: [], handle: 'x0' }]
+    tracker.trimKeeps(without, tracker.carriers(without))
+    tracker.compactionEnded(true)
+    expect([...tracker.carriers([{ role: 'assistant', text: 'running', toolUses: [], handle: 'y0' }])]).toEqual([])
+  })
+
+  test('a compaction that does not stand keeps what the last trim kept', () => {
+    const before: SessionMessage[] = [{ role: 'assistant', text: 'running', toolUses: [], handle: 'a0' }]
+    const tracker = trimmedOnce(before, 'a0')
+    tracker.compactionEnded(false)
+    expect([...tracker.carriers([{ role: 'assistant', text: 'running', toolUses: [], handle: 'y0' }])]).toEqual(['y0'])
   })
 })

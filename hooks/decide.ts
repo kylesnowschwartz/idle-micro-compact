@@ -24,15 +24,37 @@ const TOKENS_PER_TOOL_RESULT_CHAR = 0.44
 // signature's length less a fixed part per block, so a short signature costs nothing countable.
 const THINKING_TOKENS_PER_SIGNATURE_CHAR = 0.2745
 const THINKING_TOKENS_SUBTRACTED_PER_BLOCK = 274
-// An image or PDF in a tool result, which the message list shows as no text.
+// Stopgap, not calibrated: a thinking block that carries its text costs at least a token per 4
+// characters of it.
+const THINKING_CHARS_PER_TOKEN = 4
+// An image the API reads at up to 1568 px on its long edge, scaled down to fit, at a token per
+// 750 pixels, and at most about 1600 tokens an image. Stopgap: a model that reads images at a
+// higher resolution costs more than this, so the estimate errs high for it.
+const IMAGE_MAX_LONG_EDGE_PX = 1568
+const PIXELS_PER_IMAGE_TOKEN = 750
+const MAX_TOKENS_PER_IMAGE = 1600
+// A PDF, or an image of unknown size: the message list shows it as no text.
 const TOKENS_PER_MASKED_MEDIA = 1000
 
-/** One thinking block's tokens, from its signature's length. */
+/** An image's or a PDF's size as the model reads it: in pixels for an image, unknown otherwise. */
+export type MediaSize = { width: number; height: number } | undefined
+
+/** The tokens a masked image or PDF costs. */
+export function mediaTokens(size: MediaSize) {
+  if (size === undefined) return TOKENS_PER_MASKED_MEDIA
+  const scale = Math.min(1, IMAGE_MAX_LONG_EDGE_PX / Math.max(size.width, size.height))
+  const pixels = Math.round(size.width * scale) * Math.round(size.height * scale)
+  return Math.min(MAX_TOKENS_PER_IMAGE, Math.round(pixels / PIXELS_PER_IMAGE_TOKEN))
+}
+
+/** One thinking block's tokens: from its signature's length, or its text's when that is more. */
 function thinkingTokensOf(block: ApiMessage['content'][number]) {
   // Stopgap: a redacted block carries its encrypted thinking in `data` rather than a signature, and
   // is costed at the signature rate until redacted blocks have a rate of their own.
   const signature = typeof block.signature === 'string' ? block.signature : typeof block.data === 'string' ? block.data : ''
-  return Math.max(0, THINKING_TOKENS_PER_SIGNATURE_CHAR * signature.length - THINKING_TOKENS_SUBTRACTED_PER_BLOCK)
+  const bySignature = Math.max(0, THINKING_TOKENS_PER_SIGNATURE_CHAR * signature.length - THINKING_TOKENS_SUBTRACTED_PER_BLOCK)
+  const text = typeof block.thinking === 'string' ? block.thinking : ''
+  return Math.max(bySignature, text.length / THINKING_CHARS_PER_TOKEN)
 }
 
 /** Each thinking block's tokens, in conversation order. */
@@ -74,8 +96,8 @@ type EstimateInput = {
   compacted: readonly SessionMessage[]
   // the thinking the compaction drops, as droppedThinkingTokensIn counts it
   droppedThinkingTokens: number
-  // the images and PDFs the compaction replaced with a placeholder
-  maskedMedia: number
+  // the tokens of the images and PDFs the compaction replaced with a placeholder, as mediaTokens counts them
+  maskedMediaTokens: number
 }
 
 /**
@@ -85,11 +107,10 @@ type EstimateInput = {
  * in other tools' results, which the message list does not show. So the estimate errs high, toward
  * the summary. No token-count request: the timer fires with minutes to spare, not hours.
  */
-export function estimateAfter({ conversationTokens, original, compacted, droppedThinkingTokens, maskedMedia }: EstimateInput) {
+export function estimateAfter({ conversationTokens, original, compacted, droppedThinkingTokens, maskedMediaTokens }: EstimateInput) {
   // A masked image or PDF swaps empty text for a longer placeholder: its text removes nothing.
   const removedToolResultChars = Math.max(0, readableChars(original) - readableChars(compacted))
-  const removedTokens =
-    TOKENS_PER_TOOL_RESULT_CHAR * removedToolResultChars + droppedThinkingTokens + TOKENS_PER_MASKED_MEDIA * maskedMedia
+  const removedTokens = TOKENS_PER_TOOL_RESULT_CHAR * removedToolResultChars + droppedThinkingTokens + maskedMediaTokens
   return Math.max(0, Math.round(conversationTokens - removedTokens))
 }
 
