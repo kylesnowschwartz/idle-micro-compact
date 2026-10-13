@@ -155,7 +155,7 @@ async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens
   // Dropping the thinking-only messages drops all the thinking the API view holds; with none dropped, none counts.
   const droppedThinkingTokens = stats.thinkingDropped ? await sentBackThinkingTokens($) : 0
   const estimate = estimateAfter({
-    conversationTokens, original: e.messages, compacted: messages, droppedThinkingTokens, maskedMedia: stats.mediaMasked,
+    conversationTokens, original: e.messages, compacted: messages, droppedThinkingTokens, maskedMediaTokens: stats.mediaTokens,
   })
   const branch = chooseBranch(estimate, settings.microTargetTokens, stats)
   if (branch.kind === 'micro') {

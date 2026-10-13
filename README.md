@@ -163,9 +163,10 @@ No line appears if the size is unknown, a turn overtakes the timer, or Claude Co
 ## Caveats
 
 - **The estimate tends to be high.** It subtracts removed tool output, dropped thinking, and masked
-  images and PDFs at fixed token rates for Opus 5.5. It does not count attachments Claude Code drops
-  with a rewritten message, or images inside MCP tool results. A conversation near
-  `microTargetTokens` may get a summary when trimming would have been enough.
+  images and PDFs at fixed token rates for Opus 5.5. An image counts by its size, up to 1,600
+  tokens. A PDF counts 1,000. It does not count attachments Claude Code drops with a rewritten
+  message, or images inside MCP tool results. A conversation near `microTargetTokens` may get a
+  summary when trimming would have been enough.
 - **Micro-compaction rewrites the transcript from the first changed message.** The next request
   re-caches from that point. This is cheaper than re-caching the whole conversation cold, but it is
   not free.
