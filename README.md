@@ -48,7 +48,7 @@ Run `/reload-plugins` in each open Claude Code session after installation.
 
 The mod registers hooks for session and turn events. It reads conversation usage and messages,
 stores the last turn time in Claude Code's plugin state, runs the built-in `/compact` command, and
-writes a transcript log line and status line. It does not add a command of its own.
+writes a transcript log line and status line. It adds one command, `/micro-compact`.
 
 ## Configure
 
@@ -115,6 +115,13 @@ When the timer fires, the mod follows these steps:
 
 The automatic request appears in the transcript as a manual `/compact` line.
 
+Run `/micro-compact` to compact now instead of waiting for the timer:
+
+- It follows the same steps, except the `minTokens` floor (step 2) and the cache deadline (step 3).
+- If the size is unknown, as right after a compaction, it writes a `not compacted:` line and stops.
+- Typed during a turn, it runs when the turn ends.
+- It cancels the idle timer. The next turn starts a new one.
+
 ## What micro-compaction keeps and drops
 
 | Result | What stays |
@@ -144,9 +151,12 @@ status. The next turn clears the status. Examples:
 ```text
 ● idle-micro-compact: trimmed at 23:00 after 50 min idle: 175k → ~73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)
 ● idle-micro-compact: summarized at 18:41 after 50 min idle: 285k → 19k summary
+● idle-micro-compact: trimmed at 14:50 by /micro-compact: 175k → ~73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)
 ```
 
-The status for the same two compactions:
+A line from `/micro-compact` says `by /micro-compact` where the timer's says `after 50 min idle`.
+
+The status for the first two compactions:
 
 ```text
 trimmed at 23:00: 175k → ~73k tokens
@@ -164,10 +174,11 @@ summarized at 18:41: 285k → 19k summary
 - `not trimmed at` appears when masking would save less than `minSavedShare`, as in
   `not trimmed at 11:04 after 1 min idle: a trim would save ~0 of 44k tokens, under the 10% minimum`.
   It does not set a status.
-- `not compacted:` appears for a known-small or late conversation, or a failed compaction. It does
-  not set a status.
+- `not compacted:` appears for a known-small or late conversation, a failed compaction, or an
+  unknown size after `/micro-compact`. It does not set a status.
 
-No line appears if the size is unknown, a turn overtakes the timer, or Claude Code skips compaction.
+The timer writes no line if the size is unknown, a turn overtakes it, or Claude Code skips
+compaction.
 
 ## Caveats
 

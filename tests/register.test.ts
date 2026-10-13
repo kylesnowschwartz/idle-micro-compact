@@ -72,7 +72,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
   // duringRead: run once while the module reads `$.state`, to overtake a re-arm.
   // duringWrite: run once before a write to `$.state` lands, to overtake an arm.
   const seen = {
-    compacts: [] as string[], commands: [] as string[], logs: [] as string[], debug: [] as string[], status: [] as (string | undefined)[], lateMs: 0, isCompacted: false,
+    compacts: [] as string[], commands: [] as string[], registered: [] as { name: string; description: string }[], logs: [] as string[], debug: [] as string[], status: [] as (string | undefined)[], lateMs: 0, isCompacted: false,
     stored, duringRead: undefined as (() => Promise<unknown>) | undefined,
     duringUsage: undefined as (() => Promise<unknown>) | undefined,
     duringWrite: undefined as (() => Promise<unknown>) | undefined,
@@ -102,6 +102,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
     if (compact === 'skip') return { skip: 'nothing to compact' }
     return { messages: [SUMMARY], tokensBefore: tokens ?? undefined, tokensAfter: 12_000, usage }
   })
+  on('command.register', (_$, e) => (seen.registered.push({ name: e.name, description: e.description }), { value: { command: e.name } }))
   on('ui.log', (_$, e) => ((e.to === 'debug' ? seen.debug : seen.logs).push(e.text), { value: undefined }))
   on('ui.status', (_$, e) => (seen.status.push(e.text), { value: undefined }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
@@ -135,6 +136,12 @@ const turnStart = ($: Engine) => $.turn.start({ text: 'back', turnId: 't2' })
 const reload = ($: Engine) => $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
 
 const T0 = Date.parse('2026-09-29T18:00:00')
+
+/** The person typing /micro-compact at the prompt. */
+async function microCompact($: Engine, clock: { settle: () => Promise<void> }) {
+  await $.command.run({ command: 'micro-compact', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+  await clock.settle()
+}
 
 describe('timing', () => {
   test('compacts 50 minutes after the last turn', async ($, on) => {
@@ -591,5 +598,76 @@ describe('the minSavedShare option', () => {
     for (const minSavedShare of [1.5, -0.2, 'lots', true, ['0.5']]) expect(readSettings({ minSavedShare }).minSavedShare).toBe(0.1)
     expect(readSettings({ minSavedShare: 1 }).minSavedShare).toBe(1)
     expect(readSettings({ minSavedShare: '0.25' }).minSavedShare).toBe(0.25)
+  })
+})
+
+describe('/micro-compact', () => {
+  test('is registered for the command menu', async ($, on) => {
+    const { seen } = setup($, on)
+    await reload($)
+    expect(seen.registered).toEqual([{ name: 'micro-compact', description: "Trim old tool results now, or summarize if trimming isn't enough" }])
+  })
+
+  test('trims at once and says it ran by the command', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: READ })
+    await microCompact($, clock)
+    expect(seen.commands.length).toBe(1)
+    expect(seen.commands[0]).toStartWith('This idle compaction ran on request at 18:00, by /micro-compact. ')
+    expect(seen.compacts).toEqual([])
+    expect(seen.logs).toEqual([
+      'trimmed at 18:00 by /micro-compact: 120k → ~106k tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
+    ])
+    expect(seen.status).toEqual(['trimmed at 18:00: 120k → ~106k tokens'])
+  })
+
+  test('ignores the minTokens floor', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 50_000, messages: 30_000, transcript: READ })
+    await microCompact($, clock)
+    expect(seen.logs).toEqual([
+      'trimmed at 18:00 by /micro-compact: 30k → ~16k tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
+    ])
+  })
+
+  test('leaves the conversation alone when a trim would save under 10% of it', { options: { microTargetTokens: 1_000_000 } }, async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 320_000, transcript: READ })
+    await microCompact($, clock)
+    expect(seen.isCompacted).toBe(false)
+    expect(seen.logs).toEqual(['not trimmed at 18:00 by /micro-compact: a trim would save ~14k of 300k tokens, under the 10% minimum'])
+    expect(seen.status).toEqual([])
+  })
+
+  test('writes the summary when the trim would land over the target', async ($, on) => {
+    const { clock, seen } = setup($, on)
+    await microCompact($, clock)
+    expect(seen.compacts.length).toBe(1)
+    expect(seen.compacts[0]).toStartWith('This idle compaction ran on request at 18:00, by /micro-compact. Open the summary by saying so.')
+    expect(seen.logs).toEqual(['summarized at 18:00 by /micro-compact: 200k → 12k summary'])
+    expect(seen.debug).toEqual(['summary chosen: trim estimate 180k, target 150k'])
+    expect(seen.status).toEqual(['summarized at 18:00: 200k → 12k summary'])
+  })
+
+  test('an unknown size, as after a compaction, says so and runs nothing', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: null })
+    await microCompact($, clock)
+    expect(seen.commands).toEqual([])
+    expect(seen.logs).toEqual(["not compacted: the conversation's size is unknown until the next response, as after a compaction"])
+  })
+
+  test('takes the place of the pending idle timer until the next turn', { options: { microTargetTokens: 1_000_000 } }, async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 320_000, transcript: READ })
+    await turnDone($)
+    await clock.advance(10 * MIN)
+    await microCompact($, clock)
+    expect(seen.stored).toBe(null)
+    await reload($)
+    await clock.advance(2 * 60 * MIN)
+    await clock.settle()
+    expect(seen.commands.length).toBe(1)
+    await turnStart($)
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.commands.length).toBe(2)
+    expect(seen.logs[1]).toStartWith('not trimmed at 21:00 after 50 min idle: ')
   })
 })

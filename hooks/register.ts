@@ -18,11 +18,15 @@ const DEFAULT_MICRO_TARGET_TOKENS = 150_000
 // transcript: the next request writes all of it to the cache again.
 const DEFAULT_MIN_SAVED_SHARE = 0.1
 
-// How the instructions of this module's own /compact open. Its session.compact hook looks for this
-// opening to tell its own call apart from a person's /compact or another plugin's. The rest of the
-// instructions guide the summary, so a summary written without the hook's help (the hook was
-// skipped, or chose the summary) gets the same guidance.
-const IDLE_OPENING = 'This idle compaction ran automatically at '
+// How the instructions of this module's own /compact open, from the timer and from /micro-compact
+// alike. Its session.compact hook looks for this opening to tell its own call apart from a person's
+// /compact or another plugin's. The rest of the instructions guide the summary, so a summary written
+// without the hook's help (the hook was skipped, or chose the summary) gets the same guidance.
+const OWN_OPENING = 'This idle compaction ran '
+
+// The slash command that runs the timer's compaction at once. Spelled out where it is registered and
+// hooked: `claude plugin validate` recognizes a hook answering its own command by a literal name only.
+const COMMAND = 'micro-compact'
 
 // When a session's last main-loop turn ended (declared in types/index.d.ts). Held by the host for the
 // process, so it outlives a reload of this module.
@@ -46,7 +50,7 @@ type IdleWindow = { since: number; latest: number }
 /** The sizes just before compacting: the whole context, and the conversation within it. */
 type SizesBefore = { contextTokens: number; conversationTokens: number }
 
-/** The conversation's size as the timer measured it just before asking for its compaction. */
+/** The conversation's size as measured just before asking for this module's compaction. */
 type Pending = { conversationTokens: number }
 
 /** Per-activation state: the armed timer and what the module has put on screen. */
@@ -55,9 +59,9 @@ type State = {
   // Bumped on every disarm, so an arm still awaiting its reads can tell it was overtaken.
   generation: number
   hasStatus: boolean
-  // What the timer measured just before its compaction, for the session.compact hook.
+  // What was measured just before this module's compaction, for the session.compact hook.
   pending?: Pending
-  // Set by the session.compact hook during this module's own compaction, read by the timer after.
+  // Set by the session.compact hook during this module's own compaction, read after it for the report.
   outcome?: Outcome
 }
 
@@ -88,7 +92,7 @@ export function readSettings(options: PluginOptions): Settings {
   }
 }
 
-const isIdleCompaction = (e: SessionCompactInput) => e.agentId === undefined && e.instructions?.startsWith(IDLE_OPENING) === true
+const isOwnCompaction = (e: SessionCompactInput) => e.agentId === undefined && e.instructions?.startsWith(OWN_OPENING) === true
 
 const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5)
 
@@ -105,8 +109,11 @@ function conversationTokensOf(context: SessionContextUsage) {
   return row?.tokens ?? context.tokens
 }
 
-const instructions = ({ at, idleMin }: When) =>
-  `${IDLE_OPENING}${at}, after ${idleMin} minutes idle, before the prompt cache expired. ` +
+const instructions = (when: When) =>
+  OWN_OPENING +
+  ('command' in when
+    ? `on request at ${when.at}, by /${when.command}. `
+    : `automatically at ${when.at}, after ${when.idleMin} minutes idle, before the prompt cache expired. `) +
   'Open the summary by saying so. Keep open tasks, decisions and their reasons, pending follow-ups with dates, ' +
   'file paths touched, and anything the user asked to be remembered.'
 
@@ -190,7 +197,7 @@ async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens
 }
 
 /** Runs /compact with the measured size held for the session.compact hook, and returns what the hook decided. */
-async function runIdleCompaction($: EngineInterface, state: State, conversationTokens: number, when: When) {
+async function runOwnCompaction($: EngineInterface, state: State, conversationTokens: number, when: When) {
   state.pending = { conversationTokens }
   state.outcome = undefined
   // Through the /compact command rather than $.session.compact: the engine doesn't run a plugin's
@@ -228,14 +235,29 @@ async function report($: EngineInterface, state: State, { outcome, when, context
   state.hasStatus = true
 }
 
+type Run = { sizes: SizesBefore; when: When; settings: Settings; isOvertaken: () => boolean }
+
+/** The part the timer and /micro-compact share once the size is known: compact, then report what the hook decided. */
+async function compactAndReport($: EngineInterface, state: State, { sizes, when, settings, isOvertaken }: Run) {
+  // A turn that started while the size was measured means the person is back: leave the conversation be.
+  if (isOvertaken()) return
+  const outcome = await runOwnCompaction($, state, sizes.conversationTokens, when)
+  if (outcome === undefined) {
+    $.ui.log(`not compacted by this mod at ${when.at}: /compact ran, but its session.compact hook never saw it`)
+    return
+  }
+  await report($, state, { outcome, when, contextTokens: sizes.contextTokens, settings, isOvertaken })
+}
+
+const failedLine = (err: unknown) => `not compacted: ${err instanceof Error ? err.message : String(err)}`
+
 async function compactIfWorthIt($: EngineInterface, state: State, { idle, settings }: { idle: IdleWindow; settings: Settings }) {
   const isOvertaken = overtakenSince(state)
   try {
     const sizes = await measureBefore($)
     if (sizes === undefined) return
-    const { contextTokens, conversationTokens } = sizes
-    if (conversationTokens < settings.minTokens) {
-      $.ui.log(`not compacted: the conversation is ${approx(conversationTokens)} tokens, under the ${approx(settings.minTokens)} floor`)
+    if (sizes.conversationTokens < settings.minTokens) {
+      $.ui.log(`not compacted: the conversation is ${approx(sizes.conversationTokens)} tokens, under the ${approx(settings.minTokens)} floor`)
       return
     }
     const now = await $.clock.now()
@@ -246,17 +268,31 @@ async function compactIfWorthIt($: EngineInterface, state: State, { idle, settin
       $.ui.log(`not compacted: the timer fired ${when.idleMin} min after the last turn, too late for a warm cache`)
       return
     }
-    // A turn that started while the timer measured means the person is back: leave the conversation be.
-    if (isOvertaken()) return
-    const outcome = await runIdleCompaction($, state, conversationTokens, when)
-    if (outcome === undefined) {
-      $.ui.log(`not compacted by this mod at ${when.at}: /compact ran, but its session.compact hook never saw it`)
-      return
-    }
-    await report($, state, { outcome, when, contextTokens, settings, isOvertaken })
+    await compactAndReport($, state, { sizes, when, settings, isOvertaken })
   } catch (err) {
     // The next turn.complete re-arms the timer.
-    $.ui.log(`not compacted: ${err instanceof Error ? err.message : String(err)}`)
+    $.ui.log(failedLine(err))
+  }
+}
+
+/**
+ * /micro-compact: the timer's compaction, now. The person asked for it, so the `minTokens` floor
+ * does not apply; every other rule does. It takes the place of the pending timer, which the next
+ * turn arms again.
+ */
+async function compactOnRequest($: EngineInterface, state: State, settings: Settings) {
+  disarm(state)
+  const isOvertaken = overtakenSince(state)
+  try {
+    await forget($)
+    const sizes = await measureBefore($)
+    if (sizes === undefined) {
+      $.ui.log("not compacted: the conversation's size is unknown until the next response, as after a compaction")
+      return
+    }
+    await compactAndReport($, state, { sizes, when: { at: hhmm(await $.clock.now()), command: COMMAND }, settings, isOvertaken })
+  } catch (err) {
+    $.ui.log(failedLine(err))
   }
 }
 
@@ -305,18 +341,19 @@ async function rearm($: EngineInterface, state: State, settings: Settings) {
  * save too little of the conversation is not made, and nothing else is either: the conversation is
  * left as it is. Each outcome leaves a note in the transcript; a compaction also pins the status
  * line. The time of the last turn is kept in `$.state`, so a reload of the module, which cancels
- * the timer, re-arms it for the time left.
+ * the timer, re-arms it for the time left. `/micro-compact` runs the same compaction at once,
+ * whatever the conversation's size.
  */
 export const register: Register = (on, options) => {
   const settings = readSettings(options)
   // A reloaded module can't tell whether the one before it pinned a status: assume it did.
   const state: State = { generation: 0, hasStatus: true }
 
-  // Only this module's idle compaction, which arrives as a /compact with its instructions: the
+  // Only this module's own compaction, which arrives as a /compact with its instructions: the
   // person's own /compact, auto-compaction, a subagent's and other plugins' calls go on untouched.
   on('session.compact', { trigger: 'manual' }, async ($, e, next) => {
-    if (!isIdleCompaction(e)) return next(e)
-    // Raised by someone other than this module's timer, which measured nothing: measure now.
+    if (!isOwnCompaction(e)) return next(e)
+    // Raised by someone other than this module, which measured nothing: measure now.
     const conversationTokens =
       state.pending?.conversationTokens ?? conversationTokensOf((await $.session.usage({ breakdown: 'full' })).context)
     return conversationTokens === undefined ? next(e) : maskOrSummarize($, { e, next, conversationTokens, state, settings })
@@ -352,7 +389,19 @@ export const register: Register = (on, options) => {
   // cancels the timer: pick up where the last turn left off.
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    await $.command.register({
+      name: 'micro-compact',
+      description: "Trim old tool results now, or summarize if trimming isn't enough",
+    }).catch(() => {})
     await rearm($, state, settings).catch(() => {})
     return result
+  })
+
+  // Registered without `immediate`, so a /micro-compact typed during a turn waits for the turn to end.
+  // The compaction is not awaited: the /compact it runs waits for this command to finish, and the
+  // host refuses a $.command.run that a command.run hook would wait on.
+  on('command.run', { command: 'micro-compact' }, async ($) => {
+    void compactOnRequest($, state, settings)
+    return {}
   })
 }
