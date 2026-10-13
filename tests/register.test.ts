@@ -499,9 +499,9 @@ describe('choosing the branch', () => {
     expect(seen.commands.length).toBe(1)
     expect(seen.compacts).toEqual([])
     expect(seen.logs).toEqual([
-      'trimmed at 18:50 after 50 min idle: 120k → about 106k tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
+      'trimmed at 18:50 after 50 min idle: 120k → ~106k tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
     ])
-    expect(seen.status).toEqual(['trimmed at 18:50: 120k → about 106k tokens'])
+    expect(seen.status).toEqual(['trimmed at 18:50: 120k → ~106k tokens'])
   })
 
   test('writes the summary when the masked transcript would still be over the target', { options: { microTargetTokens: 100 } }, async ($, on) => {

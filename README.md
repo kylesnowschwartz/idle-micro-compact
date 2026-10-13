@@ -136,14 +136,14 @@ After a successful compaction, the mod writes a line to the transcript and pins 
 status. The next turn clears the status. Examples:
 
 ```text
-● idle-micro-compact: trimmed at 23:00 after 50 min idle: 175k → about 73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)
+● idle-micro-compact: trimmed at 23:00 after 50 min idle: 175k → ~73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)
 ● idle-micro-compact: summarized at 18:41 after 50 min idle: 285k → 19k summary
 ```
 
 The status for the same two compactions:
 
 ```text
-trimmed at 23:00: 175k → about 73k tokens
+trimmed at 23:00: 175k → ~73k tokens
 summarized at 18:41: 285k → 19k summary
 ```
 

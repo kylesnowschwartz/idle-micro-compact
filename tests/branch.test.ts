@@ -260,8 +260,8 @@ describe('the line', () => {
   test('micro: sizes and what was taken out', () => {
     const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 175_000, estimate: 73_400, stats: { masked: 21, mediaMasked: 0, trimmedToHeadAndTail: 8, errorsCutToStart: 0, thinkingDropped: 66 } }
     expect(microLine({ when: { at: '23:00', idleMin: 50 }, outcome })).toEqual({
-      status: 'trimmed at 23:00: 175k → about 73k tokens',
-      log: 'trimmed at 23:00 after 50 min idle: 175k → about 73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)',
+      status: 'trimmed at 23:00: 175k → ~73k tokens',
+      log: 'trimmed at 23:00 after 50 min idle: 175k → ~73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)',
     })
   })
 
@@ -269,7 +269,7 @@ describe('the line', () => {
     const base = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000 }
     const stats = { masked: 3, mediaMasked: 0, trimmedToHeadAndTail: 4, errorsCutToStart: 2, thinkingDropped: 5 }
     expect(microLine({ when, outcome: { ...base, stats } }).log).toBe(
-      'trimmed at 18:50 after 50 min idle: 80k → about 30k tokens (3 old tool results removed, 4 shortened, 2 errors cut to their start, 5 thinking blocks dropped)',
+      'trimmed at 18:50 after 50 min idle: 80k → ~30k tokens (3 old tool results removed, 4 shortened, 2 errors cut to their start, 5 thinking blocks dropped)',
     )
     expect(microLine({ when, outcome: { ...base, stats: { ...stats, errorsCutToStart: 1 } } }).log).toContain('4 shortened, 1 error cut to its start, 5 thinking')
     expect(microLine({ when, outcome: { ...base, stats: { ...stats, errorsCutToStart: 0 } } }).log).not.toContain('error')
@@ -278,13 +278,13 @@ describe('the line', () => {
   test('micro: singular counts', () => {
     const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000, stats: { masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 1, errorsCutToStart: 0, thinkingDropped: 1 } }
     expect(microLine({ when, outcome }).log).toBe(
-      'trimmed at 18:50 after 50 min idle: 80k → about 30k tokens (1 old tool result removed, 1 shortened, 1 thinking block dropped)',
+      'trimmed at 18:50 after 50 min idle: 80k → ~30k tokens (1 old tool result removed, 1 shortened, 1 thinking block dropped)',
     )
   })
 
   test('micro: small figures are shown as they are', () => {
     const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 120_000, estimate: 900, stats: { ...none, masked: 1 } }
-    expect(microLine({ when, outcome }).status).toBe('trimmed at 18:50: 120k → about 900 tokens')
+    expect(microLine({ when, outcome }).status).toBe('trimmed at 18:50: 120k → ~900 tokens')
   })
 
   const usage = { input_tokens: 1_500, output_tokens: 800, cache_read_input_tokens: 198_000, cache_creation_input_tokens: 500 }

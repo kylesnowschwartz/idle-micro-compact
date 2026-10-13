@@ -50,7 +50,7 @@ export function microLine({ when: { at, idleMin }, outcome }: MicroLineInput): L
     ...(errorsCutToStart ? [plural(errorsCutToStart, 'error cut to its start', 'errors cut to their start')] : []),
     plural(thinkingDropped, 'thinking block dropped', 'thinking blocks dropped'),
   ].join(', ')
-  const sizes = `${approx(outcome.conversationTokens)} → about ${approx(outcome.estimate)} tokens`
+  const sizes = `${approx(outcome.conversationTokens)} → ~${approx(outcome.estimate)} tokens`
   return { status: `trimmed at ${at}: ${sizes}`, log: `trimmed at ${at} after ${idleMin} min idle: ${sizes} (${removed})` }
 }
 
