@@ -204,6 +204,20 @@ describe('the estimate', () => {
     expect(stats.mediaMasked).toBe(2)
     expect(estimateAfter({ conversationTokens: 50_000, original, compacted: trimmed, ...none, maskedMedia: stats.mediaMasked })).toBe(48_000)
   })
+
+  test('a message kept whole for the rows it carries takes nothing off', () => {
+    const image = { type: 'image', file: { dimensions: { originalWidth: 256, originalHeight: 256 } } }
+    const original: SessionMessage[] = [
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'i', tool: 'Read', input: { file_path: '/w/img.png' } }], handle: 'a1' },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'i', text: '', isError: false, result: image }], handle: 'u1' },
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r', tool: 'Read', input: { file_path: '/w/a.ts' } }], handle: 'a2' },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r', text: numbered(1, 300), isError: false }], handle: 'u2' },
+      ...fiveShortCalls,
+    ]
+    const { messages: trimmed, stats } = maskOldToolResults(original, new Set(['u1', 'u2']))
+    expect(stats).toEqual({ masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 2 })
+    expect(estimateAfter({ conversationTokens: 50_000, original, compacted: trimmed, ...none, maskedMedia: stats.mediaMasked })).toBe(50_000)
+  })
 })
 
 describe('the thinking size', () => {
@@ -233,8 +247,8 @@ describe('the thinking size', () => {
 })
 
 describe('the branch', () => {
-  const none = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
-  const stats = { ...none, masked: 3, thinkingDropped: 1 }
+  const none = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 }
+  const stats = { ...none, masked: 3, thinkingDropped: 1, keptForRows: 0 }
 
   test('at the target is micro, over it the summary', () => {
     expect(chooseBranch(150_000, 150_000, stats)).toEqual({ kind: 'micro' })
@@ -242,7 +256,7 @@ describe('the branch', () => {
   })
 
   test('any one change is enough: thinking, a trim or a cut error alone', () => {
-    expect(chooseBranch(10, 150_000, { ...none, thinkingDropped: 2 })).toEqual({ kind: 'micro' })
+    expect(chooseBranch(10, 150_000, { ...none, thinkingDropped: 2, keptForRows: 0 })).toEqual({ kind: 'micro' })
     expect(chooseBranch(10, 150_000, { ...none, trimmedToHeadAndTail: 1 })).toEqual({ kind: 'micro' })
     expect(chooseBranch(10, 150_000, { ...none, errorsCutToStart: 1 })).toEqual({ kind: 'micro' })
   })
@@ -255,10 +269,10 @@ describe('the branch', () => {
 describe('the line', () => {
   const when = { at: '18:50', idleMin: 50 }
 
-  const none = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
+  const none = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 }
 
   test('micro: sizes and what was taken out', () => {
-    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 175_000, estimate: 73_400, stats: { masked: 21, mediaMasked: 0, trimmedToHeadAndTail: 8, errorsCutToStart: 0, thinkingDropped: 66 } }
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 175_000, estimate: 73_400, stats: { masked: 21, mediaMasked: 0, trimmedToHeadAndTail: 8, errorsCutToStart: 0, thinkingDropped: 66, keptForRows: 0 } }
     expect(microLine({ when: { at: '23:00', idleMin: 50 }, outcome })).toEqual({
       status: 'trimmed at 23:00: 175k → ~73k tokens',
       log: 'trimmed at 23:00 after 50 min idle: 175k → ~73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)',
@@ -267,7 +281,7 @@ describe('the line', () => {
 
   test('micro: cut errors are named only when there are some', () => {
     const base = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000 }
-    const stats = { masked: 3, mediaMasked: 0, trimmedToHeadAndTail: 4, errorsCutToStart: 2, thinkingDropped: 5 }
+    const stats = { masked: 3, mediaMasked: 0, trimmedToHeadAndTail: 4, errorsCutToStart: 2, thinkingDropped: 5, keptForRows: 0 }
     expect(microLine({ when, outcome: { ...base, stats } }).log).toBe(
       'trimmed at 18:50 after 50 min idle: 80k → ~30k tokens (3 old tool results removed, 4 shortened, 2 errors cut to their start, 5 thinking blocks dropped)',
     )
@@ -276,9 +290,22 @@ describe('the line', () => {
   })
 
   test('micro: singular counts', () => {
-    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000, stats: { masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 1, errorsCutToStart: 0, thinkingDropped: 1 } }
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000, stats: { masked: 1, mediaMasked: 0, trimmedToHeadAndTail: 1, errorsCutToStart: 0, thinkingDropped: 1, keptForRows: 0 } }
     expect(microLine({ when, outcome }).log).toBe(
       'trimmed at 18:50 after 50 min idle: 80k → ~30k tokens (1 old tool result removed, 1 shortened, 1 thinking block dropped)',
+    )
+  })
+
+  test('micro: messages kept whole go to the debug line alone, and only when there are some', () => {
+    const base = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000 }
+    const stats = { ...none, masked: 1 }
+    expect(microLine({ when, outcome: { ...base, stats } }).debug).toBeUndefined()
+    const one = microLine({ when, outcome: { ...base, stats: { ...stats, keptForRows: 1 } } })
+    expect(one.debug).toBe('trim kept 1 message whole for the report or queued message it carries')
+    expect(one.log).toBe(microLine({ when, outcome: { ...base, stats } }).log)
+    expect(one.status).toBe(microLine({ when, outcome: { ...base, stats } }).status)
+    expect(microLine({ when, outcome: { ...base, stats: { ...stats, keptForRows: 2 } } }).debug).toBe(
+      'trim kept 2 messages whole for the reports or queued messages they carry',
     )
   })
 

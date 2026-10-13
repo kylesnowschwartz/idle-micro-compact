@@ -1,4 +1,5 @@
 import type { EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionContextUsage, Timer } from 'claude-code'
+import { type AppendedRows, appendedRows } from './carried.ts'
 import { chooseBranch, estimateAfter, thinkingTokensIn } from './decide.ts'
 import { maskOldToolResults } from './mask.ts'
 import { type Outcome, type When, approx, microLine, summaryLine } from './lines.ts'
@@ -143,15 +144,22 @@ async function sentBackThinkingTokens($: EngineInterface) {
   }
 }
 
-type Compaction = { e: SessionCompactInput; next: Next<'session.compact'>; conversationTokens: number; state: State; settings: Settings }
+type Compaction = {
+  e: SessionCompactInput
+  next: Next<'session.compact'>
+  conversationTokens: number
+  state: State
+  settings: Settings
+  rows: AppendedRows
+}
 
 /**
  * Masks when that is estimated to land under the target, answering with no model call; hands the
  * call down to core's summary otherwise. `conversationTokens` is the Messages row just before the
  * call: the event carries the transcript but not its size.
  */
-async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens, state, settings }: Compaction) {
-  const { messages, stats } = maskOldToolResults(e.messages)
+async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens, state, settings, rows }: Compaction) {
+  const { messages, stats } = maskOldToolResults(e.messages, rows.carriers(e.messages))
   // Dropping the thinking-only messages drops all the thinking the API view holds; with none dropped, none counts.
   const droppedThinkingTokens = stats.thinkingDropped ? await sentBackThinkingTokens($) : 0
   const estimate = estimateAfter({
@@ -280,6 +288,23 @@ export const register: Register = (on, options) => {
   const settings = readSettings(options)
   // A reloaded module can't tell whether the one before it pinned a status: assume it did.
   const state: State = { generation: 0, hasStatus: true }
+  // Starts empty on every load, so a reloaded or resumed session protects nothing it did not see arrive.
+  const rows = appendedRows()
+
+  // Records each row as it arrives, unchanged, so a trim knows which messages carry a subagent's
+  // report or a queued user message.
+  on('session.append', async ($, e, next) => {
+    rows.record(e)
+    return next(e)
+  })
+
+  // Registered before the idle compaction's hook, so it stands above it and sees every compaction
+  // that stands, this module's own trim included. Each one gives every message a new handle.
+  on('session.compact', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages !== undefined) rows.clear()
+    return result
+  })
 
   // Only this module's idle compaction, which arrives as a /compact with its instructions: the
   // person's own /compact, auto-compaction, a subagent's and other plugins' calls go on untouched.
@@ -288,7 +313,7 @@ export const register: Register = (on, options) => {
     // Raised by someone other than this module's timer, which measured nothing: measure now.
     const conversationTokens =
       state.pending?.conversationTokens ?? conversationTokensOf((await $.session.usage({ breakdown: 'full' })).context)
-    return conversationTokens === undefined ? next(e) : maskOrSummarize($, { e, next, conversationTokens, state, settings })
+    return conversationTokens === undefined ? next(e) : maskOrSummarize($, { e, next, conversationTokens, state, settings, rows })
   }).catch(($, e, next) => {
     // A throw before deciding still leaves a compaction: core's summary, with the same instructions.
     return next(e)
@@ -310,7 +335,9 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  // A /clear starts a new conversation with no session.start, so its rows start over here.
   on('session.end', async ($, e, next) => {
+    rows.clear()
     disarm(state)
     clearStatus($, state)
     await forget($)
@@ -320,6 +347,7 @@ export const register: Register = (on, options) => {
   // Also fires when the module is reloaded (/reload-plugins, an update, an options change), which
   // cancels the timer: pick up where the last turn left off.
   on('session.start', async ($, e, next) => {
+    rows.clear()
     const result = await next(e)
     await rearm($, state, settings).catch(() => {})
     return result

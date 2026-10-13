@@ -171,6 +171,10 @@ No line appears if the size is unknown, a turn overtakes the timer, or Claude Co
   not free.
 - **Masked output is removed from context.** The replacement names what Claude can read or rerun,
   but the removed content itself is unavailable.
+- **Subagent reports and queued messages survive a trim only if they arrived since the last
+  compaction.** The trim keeps a message whole when it carries a subagent's report or a message you
+  queued while Claude was working. It can only tell for rows that arrived since the last compaction,
+  session start, or plugin reload.
 - **The timing assumes a 1-hour cache.** With a 5-minute cache, the default timer fires after the
   cache is cold.
 

@@ -1,4 +1,6 @@
-import type { ContextCategory, ContextCategoryKind, ModelUsage, On, SessionContextBreakdown, SessionMessage, TurnCompleteInput } from 'claude-code'
+import type {
+  ContextCategory, ContextCategoryKind, ModelUsage, On, SessionAppendInput, SessionContextBreakdown, SessionMessage, TurnCompleteInput,
+} from 'claude-code'
 import { type Engine, describe, expect, mock, test, tier } from 'claude-code/testing'
 
 // Adapted from davidar/claude-idle-compact, tests/register.test.ts at commit
@@ -72,6 +74,8 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
   // duringWrite: run once before a write to `$.state` lands, to overtake an arm.
   const seen = {
     compacts: [] as string[], commands: [] as string[], logs: [] as string[], debug: [] as string[], status: [] as (string | undefined)[], lateMs: 0, isCompacted: false,
+    // what the last /compact installed
+    installed: undefined as readonly SessionMessage[] | undefined,
     stored, duringRead: undefined as (() => Promise<unknown>) | undefined,
     duringUsage: undefined as (() => Promise<unknown>) | undefined,
     duringWrite: undefined as (() => Promise<unknown>) | undefined,
@@ -94,6 +98,7 @@ function setup(engine: Engine, on: On, { tokens = 200_000, messages = tokens ===
     seen.commands.push(e.args)
     const result = await (engine as any).session.compact({ trigger: 'manual', instructions: e.args, messages: transcript })
     if (result.messages) seen.isCompacted = true
+    seen.installed = result.messages
     return { text: result.skip ?? 'Compacted' }
   })
   on('session.compact', (_$, e) => {
@@ -513,5 +518,203 @@ describe('choosing the branch', () => {
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
     expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
     expect(seen.debug).toEqual(['summary chosen: trim estimate 166k, target 100'])
+  })
+})
+
+/** Two long, old Reads and five short calls since: either Read's result is worth masking. */
+const TWO_READS: SessionMessage[] = [
+  { role: 'user', text: 'read a.ts and b.ts', toolUses: [], handle: 'u0' },
+  { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r1', tool: 'Read', input: { file_path: '/src/a.ts' } }], handle: 'a1' },
+  { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r1', text: numbered(1, 1000), isError: false }], handle: 'u1' },
+  { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'r2', tool: 'Read', input: { file_path: '/src/b.ts' } }], handle: 'a2' },
+  { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'r2', text: numbered(1, 1000), isError: false }], handle: 'u2' },
+  ...READ.slice(3),
+]
+
+type Row = {
+  door: SessionAppendInput['door']
+  origin: SessionAppendInput['origin']
+  type: SessionAppendInput['message']['type']
+  name?: string
+  isMeta?: true
+  agentId?: string
+}
+
+/** The kinds of row the host appends, as a session.append hook sees them. */
+const ROW_KINDS = {
+  prompt: { door: 'prompt', origin: { kind: 'composer' }, type: 'user' },
+  response: { door: 'response', origin: { kind: 'model', model: 'test' }, type: 'assistant' },
+  toolResult: { door: 'tool-result', origin: { kind: 'tool', tool: 'Read' }, type: 'user' },
+  reminder: { door: 'attachment', origin: { kind: 'engine' }, type: 'attachment', name: 'total_tokens_reminder' },
+  turnDuration: { door: 'notice', origin: { kind: 'engine' }, type: 'system', name: 'turn_duration' },
+  report: { door: 'prompt', origin: { kind: 'peer' }, type: 'user', isMeta: true },
+  queuedReport: { door: 'delivery', origin: { kind: 'peer' }, type: 'attachment', name: 'queued_command' },
+  queuedMessage: { door: 'delivery', origin: { kind: 'composer' }, type: 'attachment', name: 'queued_command' },
+  queuedTaskNotification: { door: 'delivery', origin: { kind: 'task-notification' }, type: 'attachment', name: 'queued_command' },
+  taskNotification: { door: 'prompt', origin: { kind: 'task-notification' }, type: 'user' },
+  peerPrompt: { door: 'prompt', origin: { kind: 'peer' }, type: 'user' },
+} satisfies Record<string, Row>
+
+/** Raises session.append for one row, as the host does for every row it keeps. */
+async function append($: Engine, uuid: string, kind: keyof typeof ROW_KINDS, extra: Partial<Row> = {}) {
+  const { door, origin, type, agentId, ...rest }: Row = { ...ROW_KINDS[kind], ...extra }
+  const role = type === 'assistant' ? 'assistant' : type === 'system' ? undefined : 'user'
+  const message = { type, ...rest, ...(role ? { role } : {}), content: [{ type: 'text', text: uuid }] }
+  await $.session.append({ message, door, origin, uuid, ...(agentId ? { agentId } : {}) } as SessionAppendInput)
+}
+
+/** The rows of TWO_READS up to its second Read, with `between` right after the first Read's result. */
+async function appendTwoReads($: Engine, between: (() => Promise<unknown>)[] = []) {
+  await append($, 'u0', 'prompt')
+  await append($, 'x0', 'reminder')
+  await append($, 'a1', 'response')
+  await append($, 'u1', 'toolResult')
+  for (const row of between) await row()
+  await append($, 'a2', 'response')
+  await append($, 'u2', 'toolResult')
+}
+
+/** Whether the last /compact installed TWO_READS's message with this handle untouched. */
+const keptWhole = (seen: { installed?: readonly SessionMessage[] }, handle: string) =>
+  JSON.stringify(seen.installed?.find((m) => m.handle === handle)) === JSON.stringify(TWO_READS.find((m) => m.handle === handle))
+
+const resultText = (seen: { installed?: readonly SessionMessage[] }, id: string) =>
+  seen.installed?.flatMap((m) => m.toolResults ?? []).find((r) => r.tool_use_id === id)?.text
+
+const KEPT_ONE = 'trim kept 1 message whole for the report or queued message it carries'
+
+describe('messages that carry reports or queued messages', () => {
+  const idle = async ($: Engine, clock: { advance: (ms: number) => Promise<void>; settle: () => Promise<void> }) => {
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+  }
+
+  test("the message before a subagent's report is kept whole; the other old result is masked", async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report'), () => append($, 'x1', 'turnDuration')])
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(true)
+    expect(resultText(seen, 'r2')).toStartWith('[file contents elided by compaction: /src/b.ts')
+    expect(seen.logs).toEqual([expect.stringContaining('(1 old tool result removed, 0 shortened, 0 thinking blocks dropped)')])
+    expect(seen.debug).toEqual([KEPT_ONE])
+  })
+
+  test('several reports and queued messages on one message keep it whole, counted once', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [
+      () => append($, 'h1', 'queuedReport'),
+      () => append($, 'h2', 'queuedMessage'),
+      () => append($, 'x1', 'reminder'),
+      () => append($, 'h3', 'report'),
+    ])
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(true)
+    expect(seen.debug).toEqual([KEPT_ONE])
+  })
+
+  test('the walk back passes rows that are no message, to the nearest one that is', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    // `x2` is not among the transcript's handles; `u1` is, so the queued message rides on `u1`.
+    await appendTwoReads($, [() => append($, 'x1', 'reminder'), () => append($, 'x2', 'toolResult'), () => append($, 'h1', 'queuedMessage')])
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(true)
+    expect(keptWhole(seen, 'u2')).toBe(false)
+  })
+
+  test('task notifications are not kept', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'queuedTaskNotification'), () => append($, 'h2', 'taskNotification')])
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
+    expect(seen.logs).toEqual([expect.stringContaining('(2 old tool results removed,')])
+    expect(seen.debug).toEqual([])
+  })
+
+  test('a prompt that is not an isMeta row is a message of its own, not carried', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'p1', 'prompt'), () => append($, 'p2', 'peerPrompt')])
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
+    expect(seen.debug).toEqual([])
+  })
+
+  test("a subagent's own rows carry nothing", async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'queuedMessage', { agentId: 'sub1' })])
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
+  })
+
+  test('a report with no message before it keeps nothing whole', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await append($, 'h1', 'report')
+    await appendTwoReads($)
+    await idle($, clock)
+    expect(seen.logs).toEqual([expect.stringContaining('(2 old tool results removed,')])
+    expect(seen.debug).toEqual([])
+  })
+
+  test('a compaction that stands forgets the rows before it', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report')])
+    // Another compaction: core's summary, beneath every hook of the module.
+    await ($ as any).session.compact({ trigger: 'auto', messages: TWO_READS })
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
+    expect(seen.debug).toEqual([])
+  })
+
+  test("the module's own trim forgets the rows before it", async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report')])
+    await idle($, clock)
+    expect(seen.debug).toEqual([KEPT_ONE])
+    seen.isCompacted = false
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
+    expect(seen.debug).toEqual([KEPT_ONE])
+  })
+
+  test('a precompute, which installs nothing, keeps the rows', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report')])
+    await ($ as any).session.compact({ trigger: 'precompute', messages: TWO_READS })
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(true)
+  })
+
+  test('a reload forgets the rows', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report')])
+    await reload($)
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
+  })
+
+  test('/clear forgets the rows', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    await appendTwoReads($, [() => append($, 'h1', 'report')])
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    await idle($, clock)
+    expect(keptWhole(seen, 'u1')).toBe(false)
+    expect(resultText(seen, 'r1')).toStartWith('[file contents elided by compaction: /src/a.ts')
+  })
+
+  test('rows are stored as they arrive', async ($, on) => {
+    setup($, on, { tokens: 140_000, transcript: TWO_READS })
+    const session = mock.session(on)
+    await append($, 'h1', 'report')
+    await append($, 'h2', 'queuedMessage')
+    expect(session.appended().map((r) => [r.uuid, r.door, r.origin.kind, r.message.type, r.message.content])).toEqual([
+      ['h1', 'prompt', 'peer', 'user', [{ type: 'text', text: 'h1' }]],
+      ['h2', 'delivery', 'composer', 'attachment', [{ type: 'text', text: 'h2' }]],
+    ])
   })
 })

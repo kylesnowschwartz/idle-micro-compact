@@ -40,9 +40,20 @@ function whyNotMicro(outcome: Outcome | undefined, targetTokens: number) {
 
 type MicroLineInput = { when: When; outcome: Outcome }
 
-/** The micro branch: the conversation before, the estimate after, and what was taken out. */
+/** How many messages the trim left whole for the reports or queued messages they carry; empty for none. */
+function keptWhole(keptForRows: number) {
+  if (!keptForRows) return ''
+  return keptForRows === 1
+    ? 'trim kept 1 message whole for the report or queued message it carries'
+    : `trim kept ${keptForRows} messages whole for the reports or queued messages they carry`
+}
+
+/**
+ * The micro branch: the conversation before, the estimate after, and what was taken out. The debug
+ * line says how many messages were kept whole for the rows they carry, and is absent when none were.
+ */
 export function microLine({ when: { at, idleMin }, outcome }: MicroLineInput): Lines {
-  const { masked, trimmedToHeadAndTail, errorsCutToStart, thinkingDropped } = outcome.stats
+  const { masked, trimmedToHeadAndTail, errorsCutToStart, thinkingDropped, keptForRows } = outcome.stats
   const removed = [
     plural(masked, 'old tool result removed', 'old tool results removed'),
     `${trimmedToHeadAndTail} shortened`,
@@ -51,7 +62,12 @@ export function microLine({ when: { at, idleMin }, outcome }: MicroLineInput): L
     plural(thinkingDropped, 'thinking block dropped', 'thinking blocks dropped'),
   ].join(', ')
   const sizes = `${approx(outcome.conversationTokens)} → ~${approx(outcome.estimate)} tokens`
-  return { status: `trimmed at ${at}: ${sizes}`, log: `trimmed at ${at} after ${idleMin} min idle: ${sizes} (${removed})` }
+  const debug = keptWhole(keptForRows)
+  return {
+    status: `trimmed at ${at}: ${sizes}`,
+    log: `trimmed at ${at} after ${idleMin} min idle: ${sizes} (${removed})`,
+    ...(debug ? { debug } : {}),
+  }
 }
 
 type SummaryLineInput = {

@@ -16,6 +16,8 @@ export type MaskStats = {
   /** Error results cut to their start */
   errorsCutToStart: number
   thinkingDropped: number
+  /** Messages the pass would have changed or dropped, kept whole for the rows they carry */
+  keptForRows: number
 }
 
 // The results of the newest tool uses are what the work in hand is about: they stay whole.
@@ -259,34 +261,50 @@ function isThinkingOnly(m: Msg): boolean {
  * and last lines; old errors keep their start; every placeholder and marker lists the files the
  * removed text named. Every other message keeps its handle, so the engine keeps it whole; a user
  * message holding a changed result is rebuilt without it.
+ *
+ * The messages whose handles are in `keepWhole` carry rows a rebuild would lose (a subagent's
+ * report, a queued user message): they stay as they are, handle and all, and are never dropped.
  */
-export function maskOldToolResults(messages: readonly Msg[]): { messages: Msg[]; stats: MaskStats } {
+export function maskOldToolResults(messages: readonly Msg[], keepWhole: ReadonlySet<string> = new Set()): { messages: Msg[]; stats: MaskStats } {
   const uses = new Map<string, ToolUseSummary>()
   for (const m of messages) for (const u of m.toolUses) uses.set(u.tool_use_id, u)
   const recent = recentToolUses(messages)
 
-  const stats: MaskStats = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
+  const stats: MaskStats = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0, keptForRows: 0 }
   const out: Msg[] = []
   for (const m of messages) {
+    const isKeptWhole = m.handle !== undefined && keepWhole.has(m.handle)
     if (isThinkingOnly(m)) {
-      stats.thinkingDropped++
+      if (isKeptWhole) {
+        stats.keptForRows++
+        out.push(m)
+      } else {
+        stats.thinkingDropped++
+      }
       continue
     }
-    let changed = false
+    const replacements: Replacement[] = []
     const toolResults = m.toolResults?.map((r) => {
       const use = uses.get(r.tool_use_id)
       if (!use || !isMaskedTool(use.tool) || recent.has(r.tool_use_id) || isAlreadyCompacted(r.text)) return r
       const replacement = replacementFor(use, r)
       if (replacement === null) return r
-      changed = true
-      stats[replacement.kind]++
-      if (replacement.isMedia) stats.mediaMasked++
+      replacements.push(replacement)
       // Rebuilt without the record, so no image or document block comes back
       return { tool_use_id: r.tool_use_id, isError: r.isError, text: replacement.text }
     })
-    if (!changed) {
+    if (!replacements.length) {
       out.push(m)
       continue
+    }
+    if (isKeptWhole) {
+      stats.keptForRows++
+      out.push(m)
+      continue
+    }
+    for (const replacement of replacements) {
+      stats[replacement.kind]++
+      if (replacement.isMedia) stats.mediaMasked++
     }
     const { handle: _, ...rest } = m
     out.push({ ...rest, toolResults })
