@@ -181,6 +181,10 @@ No line appears if the size is unknown, a turn overtakes the timer, or Claude Co
   not free.
 - **Masked output is removed from context.** The replacement names what Claude can read or rerun,
   but the removed content itself is unavailable.
+- **Rewritten messages lose their attached hidden context.** Most rows are sent again later or
+  become outdated: skill lists, reminders, and nested `CLAUDE.md` files sent again on the next Read
+  in that directory. Queued user messages and subagent reports received during a turn are lost.
+  Claude's replies to them remain, but their original text does not.
 - **The timing assumes a 1-hour cache.** With a 5-minute cache, the default timer fires after the
   cache is cold.
 
