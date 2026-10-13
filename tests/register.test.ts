@@ -232,7 +232,7 @@ describe('reloading', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
-    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k)'])
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (nothing to trim)'])
   })
 
   test('a freshly loaded module re-arms from the stored turn', async ($, on) => {
@@ -243,7 +243,7 @@ describe('reloading', () => {
     await clock.advance(2)
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
-    expect(seen.logs).toEqual(['compacted at 18:20 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k)'])
+    expect(seen.logs).toEqual(['summarized at 18:20 after 50 min idle: 200k → 12k summary (nothing to trim)'])
   })
 
   test('a reload past the deadline does nothing and says nothing', async ($, on) => {
@@ -378,11 +378,11 @@ describe('when it fires', () => {
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    const line = 'compacted at 18:50 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k)'
-    expect(seen.logs).toEqual([line])
-    expect(seen.status).toEqual([line])
+    const status = 'summarized at 18:50: 200k → 12k summary'
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (nothing to trim)'])
+    expect(seen.status).toEqual([status])
     await turnStart($)
-    expect(seen.status).toEqual([line, undefined])
+    expect(seen.status).toEqual([status, undefined])
   })
 
   test('the line says how much of the summary request came from the cache', async ($, on) => {
@@ -391,7 +391,7 @@ describe('when it fires', () => {
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (nothing to mask; 200k tokens → 12k summary, measured 15k, 99% read from cache)'])
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (nothing to trim; 99% read from cache)'])
   })
 
   test('a timer that fires late, after the machine slept, does not compact and says why', async ($, on) => {
@@ -495,9 +495,9 @@ describe('choosing the branch', () => {
     expect(seen.commands.length).toBe(1)
     expect(seen.compacts).toEqual([])
     expect(seen.logs).toEqual([
-      'micro-compacted at 18:50 after 50 min idle (120k conversation → est. 1k, measured 15k; 1 tool result masked, 0 trimmed to head and tail, 0 thinking blocks dropped, no model call)',
+      'trimmed at 18:50 after 50 min idle: 120k → about 828 tokens (1 old tool result removed, 0 shortened, 0 thinking blocks dropped)',
     ])
-    expect(seen.status).toEqual(seen.logs)
+    expect(seen.status).toEqual(['trimmed at 18:50: 120k → about 828 tokens'])
   })
 
   test('writes the summary when the masked transcript would still be over the target', { options: { microTargetTokens: 100 } }, async ($, on) => {
@@ -507,6 +507,6 @@ describe('choosing the branch', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
-    expect(seen.logs).toEqual(['compacted at 18:50 after 50 min idle (micro est. 1k, over the 100 target; 200k tokens → 12k summary, measured 15k)'])
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary (trimming would leave about 1k, over the 100 target)'])
   })
 })

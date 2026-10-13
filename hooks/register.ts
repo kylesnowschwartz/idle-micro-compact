@@ -131,16 +131,6 @@ async function measureBefore($: EngineInterface): Promise<SizesBefore | undefine
   return { contextTokens: context.tokens, conversationTokens: conversationTokensOf(context) ?? context.tokens }
 }
 
-/** The conversation's size once the compaction stands, as the Messages row has it, or undefined. */
-async function measureAfter($: EngineInterface) {
-  try {
-    const { context } = await $.session.usage({ breakdown: 'full' })
-    return conversationTokensOf(context)
-  } catch {
-    return undefined
-  }
-}
-
 /**
  * The thinking the conversation sends back, in characters. 0 when the API view can't be read: the
  * estimate then counts no thinking, in the rate or in what is removed.
@@ -195,15 +185,14 @@ async function report($: EngineInterface, state: State, { outcome, when, context
   const { summary } = outcome
   // A summary a hook beneath vetoed has left its own notice.
   if (outcome.branch.kind === 'summary' && summary?.messages === undefined) return
-  const measuredAfter = await measureAfter($)
-  const line =
+  const { status, log } =
     summary?.messages === undefined
-      ? microLine({ when, outcome, measuredAfter })
-      : summaryLine({ when, outcome, result: summary, contextTokens, measuredAfter, targetTokens: settings.microTargetTokens })
-  $.ui.log(line)
+      ? microLine({ when, outcome })
+      : summaryLine({ when, outcome, result: summary, contextTokens, targetTokens: settings.microTargetTokens })
+  $.ui.log(log)
   // A turn started while the summary ran has already cleared the status; don't pin a stale one.
   if (isOvertaken()) return
-  $.ui.status(line)
+  $.ui.status(status)
   state.hasStatus = true
 }
 

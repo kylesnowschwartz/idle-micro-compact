@@ -35,10 +35,10 @@ done
 # it never does.
 if [[ $mode == micro ]]; then
   target_tokens=1000000
-  expected='micro-compacted at'
+  expected='trimmed at'
 else
   target_tokens=1
-  expected='compacted at'
+  expected='summarized at'
 fi
 window="idle-micro-$mode"
 
@@ -107,9 +107,9 @@ fail() {
 matches_branch() {
   local line=$1
   if [[ $mode == micro ]]; then
-    [[ $line == *'micro-compacted at'* ]]
+    [[ $line == *'trimmed at'* ]]
   else
-    [[ $line == *'compacted at'* && $line != *'micro-compacted at'* ]]
+    [[ $line == *'summarized at'* ]]
   fi
 }
 

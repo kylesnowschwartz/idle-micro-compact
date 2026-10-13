@@ -250,32 +250,86 @@ describe('the line', () => {
 
   const none = { masked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
 
-  test('micro: sizes, what was masked, and no model call', () => {
-    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 180_000, estimate: 61_400, stats: { ...none, masked: 12, trimmedToHeadAndTail: 2, thinkingDropped: 1 } }
-    expect(microLine({ when, outcome, measuredAfter: 58_000 })).toBe(
-      'micro-compacted at 18:50 after 50 min idle (180k conversation → est. 61k, measured 58k; 12 tool results masked, 2 trimmed to head and tail, 1 thinking block dropped, no model call)',
-    )
-    expect(microLine({ when, outcome, measuredAfter: undefined })).toContain('est. 61k, measured size unknown;')
+  test('micro: sizes and what was taken out', () => {
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 175_000, estimate: 73_400, stats: { masked: 21, trimmedToHeadAndTail: 8, errorsCutToStart: 0, thinkingDropped: 66 } }
+    expect(microLine({ when: { at: '23:00', idleMin: 50 }, outcome })).toEqual({
+      status: 'trimmed at 23:00: 175k → about 73k tokens',
+      log: 'trimmed at 23:00 after 50 min idle: 175k → about 73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)',
+    })
   })
 
   test('micro: cut errors are named only when there are some', () => {
-    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000, stats: { masked: 1, trimmedToHeadAndTail: 0, errorsCutToStart: 2, thinkingDropped: 0 } }
-    expect(microLine({ when, outcome, measuredAfter: 29_000 })).toContain(
-      '1 tool result masked, 0 trimmed to head and tail, 2 errors cut to their start, 0 thinking blocks dropped, no model call)',
+    const base = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000 }
+    const stats = { masked: 3, trimmedToHeadAndTail: 4, errorsCutToStart: 2, thinkingDropped: 5 }
+    expect(microLine({ when, outcome: { ...base, stats } }).log).toBe(
+      'trimmed at 18:50 after 50 min idle: 80k → about 30k tokens (3 old tool results removed, 4 shortened, 2 errors cut to their start, 5 thinking blocks dropped)',
+    )
+    expect(microLine({ when, outcome: { ...base, stats: { ...stats, errorsCutToStart: 1 } } }).log).toContain('4 shortened, 1 error cut to its start, 5 thinking')
+    expect(microLine({ when, outcome: { ...base, stats: { ...stats, errorsCutToStart: 0 } } }).log).not.toContain('error')
+  })
+
+  test('micro: singular counts', () => {
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 80_000, estimate: 30_000, stats: { masked: 1, trimmedToHeadAndTail: 1, errorsCutToStart: 0, thinkingDropped: 1 } }
+    expect(microLine({ when, outcome }).log).toBe(
+      'trimmed at 18:50 after 50 min idle: 80k → about 30k tokens (1 old tool result removed, 1 shortened, 1 thinking block dropped)',
     )
   })
 
-  test('summary over the target says what micro-compaction would have left', () => {
-    const outcome = { branch: { kind: 'summary', reason: 'over-target' } as const, conversationTokens: 300_000, estimate: 210_000, stats: { ...none, masked: 2 } }
-    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensBefore: 320_000, tokensAfter: 12_000 }, contextTokens: 320_000, measuredAfter: 14_000, targetTokens: 150_000 })).toBe(
-      'compacted at 18:50 after 50 min idle (micro est. 210k, over the 150k target; 320k tokens → 12k summary, measured 14k)',
+  test('micro: small figures are shown as they are', () => {
+    const outcome = { branch: { kind: 'micro' } as const, conversationTokens: 120_000, estimate: 900, stats: { ...none, masked: 1 } }
+    expect(microLine({ when, outcome }).status).toBe('trimmed at 18:50: 120k → about 900 tokens')
+  })
+
+  const usage = { input_tokens: 1_500, output_tokens: 800, cache_read_input_tokens: 198_000, cache_creation_input_tokens: 500 }
+  const overTarget = { branch: { kind: 'summary', reason: 'over-target' } as const, conversationTokens: 280_000, estimate: 200_000, stats: { ...none, masked: 2 } }
+  const at1841 = { at: '18:41', idleMin: 50 }
+
+  test('summary over the target says what trimming would have left, and the cache share', () => {
+    const result = { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000, usage }
+    expect(summaryLine({ when: at1841, outcome: overTarget, result, contextTokens: 285_000, targetTokens: 150_000 })).toEqual({
+      status: 'summarized at 18:41: 285k → 19k summary',
+      log: 'summarized at 18:41 after 50 min idle: 285k → 19k summary (trimming would leave about 200k, over the 150k target; 99% read from cache)',
+    })
+  })
+
+  test('summary over the target without usage leaves out the cache share', () => {
+    const result = { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000 }
+    expect(summaryLine({ when: at1841, outcome: overTarget, result, contextTokens: 285_000, targetTokens: 150_000 }).log).toBe(
+      'summarized at 18:41 after 50 min idle: 285k → 19k summary (trimming would leave about 200k, over the 150k target)',
     )
   })
 
-  test('summary with nothing to mask says so', () => {
+  test('summary with nothing to mask says there is nothing to trim', () => {
     const outcome = { branch: { kind: 'summary', reason: 'nothing-to-mask' } as const, conversationTokens: 60_000, estimate: 60_000, stats: none }
-    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensAfter: 5_000 }, contextTokens: 80_000, measuredAfter: undefined, targetTokens: 150_000 })).toBe(
-      'compacted at 18:50 after 50 min idle (nothing to mask; 80k tokens → 5k summary, measured size unknown)',
+    const result = { messages: [SUMMARY], tokensAfter: 5_000, usage }
+    expect(summaryLine({ when, outcome, result, contextTokens: 80_000, targetTokens: 150_000 }).log).toBe(
+      'summarized at 18:50 after 50 min idle: 80k → 5k summary (nothing to trim; 99% read from cache)',
     )
+    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensAfter: 5_000 }, contextTokens: 80_000, targetTokens: 150_000 }).log).toBe(
+      'summarized at 18:50 after 50 min idle: 80k → 5k summary (nothing to trim)',
+    )
+  })
+
+  test('summary with no outcome gives no reason', () => {
+    const result = { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000, usage }
+    expect(summaryLine({ when: at1841, outcome: undefined, result, contextTokens: 285_000, targetTokens: 150_000 }).log).toBe(
+      'summarized at 18:41 after 50 min idle: 285k → 19k summary (99% read from cache)',
+    )
+    expect(summaryLine({ when: at1841, outcome: undefined, result: { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000 }, contextTokens: 1, targetTokens: 150_000 }).log).toBe(
+      'summarized at 18:41 after 50 min idle: 285k → 19k summary',
+    )
+  })
+
+  test('summary without tokensAfter gives only the size before', () => {
+    const result = { messages: [SUMMARY], tokensBefore: 285_000 }
+    expect(summaryLine({ when: at1841, outcome: undefined, result, contextTokens: 1, targetTokens: 150_000 })).toEqual({
+      status: 'summarized at 18:41: 285k tokens',
+      log: 'summarized at 18:41 after 50 min idle: 285k tokens',
+    })
+  })
+
+  test('summary falls back to the context size when core gives no tokensBefore', () => {
+    const result = { messages: [SUMMARY], tokensAfter: 19_000 }
+    expect(summaryLine({ when: at1841, outcome: undefined, result, contextTokens: 290_000, targetTokens: 150_000 }).status).toBe('summarized at 18:41: 290k → 19k summary')
   })
 })

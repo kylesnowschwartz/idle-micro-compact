@@ -132,18 +132,27 @@ This was an offline benchmark on one person's sessions. It checked paths by stri
 
 ## Log lines
 
-After a successful compaction, the mod writes the same line to the transcript and the status area.
-The next turn clears the status. Examples:
+After a successful compaction, the mod writes a line to the transcript and pins a shorter one as the
+status. The next turn clears the status. Examples:
 
 ```text
-● idle-micro-compact: micro-compacted at 15:18 after 1 min idle (76k conversation → est. 27k, measured 7k; 9 tool results masked, 2 trimmed to head and tail, 2 thinking blocks dropped, no model call)
-● idle-micro-compact: compacted at 14:40 after 1 min idle (micro est. 81k, over the 1 target; 88k tokens → 10k summary, measured 14k, 48% read from cache)
+● idle-micro-compact: trimmed at 23:00 after 50 min idle: 175k → about 73k tokens (21 old tool results removed, 8 shortened, 66 thinking blocks dropped)
+● idle-micro-compact: summarized at 18:41 after 50 min idle: 285k → 19k summary (trimming would leave about 200k, over the 150k target; 99% read from cache)
 ```
 
-- `est.` is the estimate used to choose micro-compaction or a summary.
-- `measured` is the Messages row reported after compaction.
-- On a summary line, the first size is the whole context. The second is the summary alone.
-- The cache percentage is the share of the summary request input read from cache.
+The status for the same two compactions:
+
+```text
+trimmed at 23:00: 175k → about 73k tokens
+summarized at 18:41: 285k → 19k summary
+```
+
+- On a trimmed line, the second size is the estimate used to choose trimming over a summary.
+- On a summarized line, the first size is the whole context. The second is the summary alone.
+- `shortened` counts tool results cut to their head and tail. Errors cut to their start are listed
+  only when there are some.
+- The parenthesis on a summarized line says why trimming wasn't enough (`nothing to trim`, or the
+  estimate over the target), then the share of the summary request input read from cache.
 - `not compacted:` appears for a known-small or late conversation, or a failed compaction. It does
   not set a status.
 
@@ -191,8 +200,8 @@ directory is ignored by Git. The root `tsconfig.json` extends the generated `tsc
 Use `scripts/try-in-tmux` to open a throwaway Claude Code session in a new tmux window:
 
 ```sh
-scripts/try-in-tmux micro      # expect `micro-compacted at`
-scripts/try-in-tmux summary    # expect `compacted at` without the `micro-` prefix
+scripts/try-in-tmux micro      # expect `trimmed at`
+scripts/try-in-tmux summary    # expect `summarized at`
 ```
 
 Inside tmux, the script opens the window in the current session. Outside tmux, it uses a detached
