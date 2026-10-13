@@ -9,6 +9,8 @@ import type { SessionMessage as Msg, ToolResultSummary, ToolUseSummary } from 'c
 export type MaskStats = {
   /** Tool results replaced by a one-line placeholder */
   masked: number
+  /** Of the masked results, the images and PDFs */
+  mediaMasked: number
   /** Command-style results cut to their first and last lines */
   trimmedToHeadAndTail: number
   /** Error results cut to their start */
@@ -208,7 +210,7 @@ function errorStart(text: string): string | null {
   return `${text.slice(0, ERROR_START_CHARS)}\n${withPaths(marker, removed)}`
 }
 
-type Replacement = { text: string; kind: 'masked' | 'trimmedToHeadAndTail' | 'errorsCutToStart' }
+type Replacement = { text: string; kind: 'masked' | 'trimmedToHeadAndTail' | 'errorsCutToStart'; isMedia?: true }
 
 /** What an old result of a masked tool becomes before the length check, or null to keep it whole. */
 function shortenedText(use: ToolUseSummary, r: ToolResultSummary): Replacement | null {
@@ -227,7 +229,7 @@ function shortenedText(use: ToolUseSummary, r: ToolResultSummary): Replacement |
 function replacementFor(use: ToolUseSummary, r: ToolResultSummary): Replacement | null {
   // An image or PDF's bulk is a block its text doesn't show, so its placeholder always saves.
   const media = use.tool === 'Read' && !r.isError ? describeMedia(use.input, r.result) : null
-  if (media !== null) return { text: media, kind: 'masked' }
+  if (media !== null) return { text: media, kind: 'masked', isMedia: true }
   const replacement = shortenedText(use, r)
   // Already short (an "unchanged since last read" stub, a tiny file, a short error)
   return replacement !== null && replacement.text.length < r.text.length ? replacement : null
@@ -263,7 +265,7 @@ export function maskOldToolResults(messages: readonly Msg[]): { messages: Msg[];
   for (const m of messages) for (const u of m.toolUses) uses.set(u.tool_use_id, u)
   const recent = recentToolUses(messages)
 
-  const stats: MaskStats = { masked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
+  const stats: MaskStats = { masked: 0, mediaMasked: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
   const out: Msg[] = []
   for (const m of messages) {
     if (isThinkingOnly(m)) {
@@ -278,6 +280,7 @@ export function maskOldToolResults(messages: readonly Msg[]): { messages: Msg[];
       if (replacement === null) return r
       changed = true
       stats[replacement.kind]++
+      if (replacement.isMedia) stats.mediaMasked++
       // Rebuilt without the record, so no image or document block comes back
       return { tool_use_id: r.tool_use_id, isError: r.isError, text: replacement.text }
     })
