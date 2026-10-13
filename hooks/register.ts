@@ -185,11 +185,12 @@ async function report($: EngineInterface, state: State, { outcome, when, context
   const { summary } = outcome
   // A summary a hook beneath vetoed has left its own notice.
   if (outcome.branch.kind === 'summary' && summary?.messages === undefined) return
-  const { status, log } =
+  const { status, log, debug } =
     summary?.messages === undefined
       ? microLine({ when, outcome })
       : summaryLine({ when, outcome, result: summary, contextTokens, targetTokens: settings.microTargetTokens })
   $.ui.log(log)
+  if (debug) $.ui.log(debug, { to: 'debug' })
   // A turn started while the summary ran has already cleared the status; don't pin a stale one.
   if (isOvertaken()) return
   $.ui.status(status)

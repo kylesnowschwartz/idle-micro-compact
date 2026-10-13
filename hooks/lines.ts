@@ -16,8 +16,8 @@ export type Outcome = {
 /** When and after how long idle the compaction ran, as the line opens with it. */
 export type When = { at: string; idleMin: number }
 
-/** One compaction in two renderings: a short pinned status and the fuller transcript log. */
-export type Lines = { status: string; log: string }
+/** One compaction in up to three renderings: a short pinned status, the transcript log, and tuning detail for the debug log. */
+export type Lines = { status: string; log: string; debug?: string }
 
 export const inThousands = (n: number) => `${Math.round(n / 1000)}k`
 // Small figures as they are: a 100-token floor isn't "0k".
@@ -28,14 +28,14 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 function cacheShare(usage: ModelUsage | undefined) {
   if (!usage) return ''
   const input = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
-  return input ? `${Math.floor((usage.cache_read_input_tokens * 100) / input)}% read from cache` : ''
+  return input ? `summary request ${Math.floor((usage.cache_read_input_tokens * 100) / input)}% cached` : ''
 }
 
-/** Why trimming wasn't enough, as the summary line gives it; empty when the hook never decided. */
+/** Why trimming wasn't enough, for the debug line; empty when the hook never decided. */
 function whyNotMicro(outcome: Outcome | undefined, targetTokens: number) {
   if (outcome?.branch.kind !== 'summary') return ''
   if (outcome.branch.reason === 'nothing-to-mask') return 'nothing to trim'
-  return `trimming would leave about ${approx(outcome.estimate)}, over the ${approx(targetTokens)} target`
+  return `trim estimate ${approx(outcome.estimate)}, target ${approx(targetTokens)}`
 }
 
 type MicroLineInput = { when: When; outcome: Outcome }
@@ -64,13 +64,18 @@ type SummaryLineInput = {
 }
 
 /**
- * The summary branch: the sizes, then in parentheses why trimming wasn't enough and the cache share.
- * With no outcome the hook never decided (it was skipped), and there is no reason.
+ * The summary branch: the sizes in the status and the log. The debug line holds why trimming wasn't
+ * enough and the cache share, and is absent when neither is known. With no outcome the hook never
+ * decided (it was skipped), and there is no reason.
  */
 export function summaryLine({ when: { at, idleMin }, outcome, result, contextTokens, targetTokens }: SummaryLineInput): Lines {
   // tokensBefore is the whole context; tokensAfter is only the summary, without the system prompt and tools.
   const before = approx(result.tokensBefore ?? contextTokens)
   const sizes = result.tokensAfter === undefined ? `${before} tokens` : `${before} → ${approx(result.tokensAfter)} summary`
   const details = [whyNotMicro(outcome, targetTokens), cacheShare(result.usage)].filter(Boolean).join('; ')
-  return { status: `summarized at ${at}: ${sizes}`, log: `summarized at ${at} after ${idleMin} min idle: ${sizes}${details ? ` (${details})` : ''}` }
+  return {
+    status: `summarized at ${at}: ${sizes}`,
+    log: `summarized at ${at} after ${idleMin} min idle: ${sizes}`,
+    ...(details ? { debug: `summary chosen: ${details}` } : {}),
+  }
 }

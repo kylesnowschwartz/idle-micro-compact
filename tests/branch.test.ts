@@ -284,40 +284,41 @@ describe('the line', () => {
   const overTarget = { branch: { kind: 'summary', reason: 'over-target' } as const, conversationTokens: 280_000, estimate: 200_000, stats: { ...none, masked: 2 } }
   const at1841 = { at: '18:41', idleMin: 50 }
 
-  test('summary over the target says what trimming would have left, and the cache share', () => {
+  test('summary over the target: sizes in the log, reason and cache share in the debug line', () => {
     const result = { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000, usage }
     expect(summaryLine({ when: at1841, outcome: overTarget, result, contextTokens: 285_000, targetTokens: 150_000 })).toEqual({
       status: 'summarized at 18:41: 285k → 19k summary',
-      log: 'summarized at 18:41 after 50 min idle: 285k → 19k summary (trimming would leave about 200k, over the 150k target; 99% read from cache)',
+      log: 'summarized at 18:41 after 50 min idle: 285k → 19k summary',
+      debug: 'summary chosen: trim estimate 200k, target 150k; summary request 99% cached',
     })
   })
 
   test('summary over the target without usage leaves out the cache share', () => {
     const result = { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000 }
-    expect(summaryLine({ when: at1841, outcome: overTarget, result, contextTokens: 285_000, targetTokens: 150_000 }).log).toBe(
-      'summarized at 18:41 after 50 min idle: 285k → 19k summary (trimming would leave about 200k, over the 150k target)',
+    expect(summaryLine({ when: at1841, outcome: overTarget, result, contextTokens: 285_000, targetTokens: 150_000 }).debug).toBe(
+      'summary chosen: trim estimate 200k, target 150k',
     )
   })
 
   test('summary with nothing to mask says there is nothing to trim', () => {
     const outcome = { branch: { kind: 'summary', reason: 'nothing-to-mask' } as const, conversationTokens: 60_000, estimate: 60_000, stats: none }
     const result = { messages: [SUMMARY], tokensAfter: 5_000, usage }
-    expect(summaryLine({ when, outcome, result, contextTokens: 80_000, targetTokens: 150_000 }).log).toBe(
-      'summarized at 18:50 after 50 min idle: 80k → 5k summary (nothing to trim; 99% read from cache)',
-    )
-    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensAfter: 5_000 }, contextTokens: 80_000, targetTokens: 150_000 }).log).toBe(
-      'summarized at 18:50 after 50 min idle: 80k → 5k summary (nothing to trim)',
+    const withUsage = summaryLine({ when, outcome, result, contextTokens: 80_000, targetTokens: 150_000 })
+    expect(withUsage.log).toBe('summarized at 18:50 after 50 min idle: 80k → 5k summary')
+    expect(withUsage.debug).toBe('summary chosen: nothing to trim; summary request 99% cached')
+    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensAfter: 5_000 }, contextTokens: 80_000, targetTokens: 150_000 }).debug).toBe(
+      'summary chosen: nothing to trim',
     )
   })
 
-  test('summary with no outcome gives no reason', () => {
+  test('summary with no outcome gives no reason, and no debug line without usage either', () => {
     const result = { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000, usage }
-    expect(summaryLine({ when: at1841, outcome: undefined, result, contextTokens: 285_000, targetTokens: 150_000 }).log).toBe(
-      'summarized at 18:41 after 50 min idle: 285k → 19k summary (99% read from cache)',
-    )
-    expect(summaryLine({ when: at1841, outcome: undefined, result: { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000 }, contextTokens: 1, targetTokens: 150_000 }).log).toBe(
-      'summarized at 18:41 after 50 min idle: 285k → 19k summary',
-    )
+    const withUsage = summaryLine({ when: at1841, outcome: undefined, result, contextTokens: 285_000, targetTokens: 150_000 })
+    expect(withUsage.log).toBe('summarized at 18:41 after 50 min idle: 285k → 19k summary')
+    expect(withUsage.debug).toBe('summary chosen: summary request 99% cached')
+    const bare = summaryLine({ when: at1841, outcome: undefined, result: { messages: [SUMMARY], tokensBefore: 285_000, tokensAfter: 19_000 }, contextTokens: 1, targetTokens: 150_000 })
+    expect(bare).toEqual({ status: 'summarized at 18:41: 285k → 19k summary', log: 'summarized at 18:41 after 50 min idle: 285k → 19k summary' })
+    expect('debug' in bare).toBe(false)
   })
 
   test('summary without tokensAfter gives only the size before', () => {
