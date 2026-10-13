@@ -34,7 +34,6 @@ function cacheShare(usage: ModelUsage | undefined) {
 /** Why trimming wasn't enough, for the debug line; empty when the hook never decided. */
 function whyNotMicro(outcome: Outcome | undefined, targetTokens: number) {
   if (outcome?.branch.kind !== 'summary') return ''
-  if (outcome.branch.reason === 'nothing-to-mask') return 'nothing to trim'
   return `trim estimate ${approx(outcome.estimate)}, target ${approx(targetTokens)}`
 }
 
@@ -52,6 +51,20 @@ export function microLine({ when: { at, idleMin }, outcome }: MicroLineInput): L
   ].join(', ')
   const sizes = `${approx(outcome.conversationTokens)} → ~${approx(outcome.estimate)} tokens`
   return { status: `trimmed at ${at}: ${sizes}`, log: `trimmed at ${at} after ${idleMin} min idle: ${sizes} (${removed})` }
+}
+
+// A share as a percentage, to a tenth at most: 0.1 is "10%", 0.025 is "2.5%".
+const percent = (share: number) => `${Number((share * 100).toFixed(1))}%`
+
+type LeftAloneLineInput = { when: When; outcome: Outcome; minSavedShare: number }
+
+/** The leave-alone branch, for the transcript alone: what a trim would save, against the minimum. */
+export function leftAloneLine({ when: { at, idleMin }, outcome, minSavedShare }: LeftAloneLineInput) {
+  const saved = Math.max(0, outcome.conversationTokens - outcome.estimate)
+  return (
+    `not trimmed at ${at} after ${idleMin} min idle: a trim would save ~${approx(saved)} of ` +
+    `${approx(outcome.conversationTokens)} tokens, under the ${percent(minSavedShare)} minimum`
+  )
 }
 
 type SummaryLineInput = {

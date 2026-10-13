@@ -35,6 +35,14 @@
       "description": "Mask old tool results and drop thinking, with no model call, when that is estimated to leave the conversation at or under this many tokens. Above it, write a summary instead.",
       "default": 150000,
       "min": 0
+    },
+    "minSavedShare": {
+      "type": "number",
+      "title": "Minimum trim saving",
+      "description": "Leave the conversation alone when a trim is estimated to save less than this share of it, from 0 to 1: 0.1 is 10%. A trim rewrites the transcript, so the next request writes all of it to the cache again.",
+      "default": 0.1,
+      "min": 0,
+      "max": 1
     }
   }
 }

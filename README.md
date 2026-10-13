@@ -74,7 +74,8 @@ Code reads plugin options from user settings, not from a project's `.claude/sett
       "options": {
         "idleMinutes": 50,
         "minTokens": 40000,
-        "microTargetTokens": 150000
+        "microTargetTokens": 150000,
+        "minSavedShare": 0.1
       }
     }
   }
@@ -86,6 +87,7 @@ Code reads plugin options from user settings, not from a project's `.claude/sett
 | `idleMinutes` | `50` | Minutes idle before compacting. `0` also uses the 50-minute default. |
 | `minTokens` | `40000` | Leave smaller conversations alone. This counts the Messages row, not the system prompt or tools. |
 | `microTargetTokens` | `150000` | Use masking with no model call when the estimated result is at or below this size. |
+| `minSavedShare` | `0.1` | Leave the conversation alone when masking would save less than this share of it, from `0` to `1`. `0.1` is 10%. |
 
 Set `idleMinutes` below `60`. A value of `60` or more leaves no warm-cache window, so the mod skips
 compaction when the timer fires.
@@ -104,8 +106,12 @@ When the timer fires, the mod follows these steps:
    slept.
 4. It runs `/compact`. Its compaction hook masks old tool results and drops thinking, then estimates
    the remaining conversation size.
-5. If masking changed the transcript and the estimate is at or below `microTargetTokens`, it installs
-   the masked transcript with no model call. Otherwise, Claude Code writes a summary.
+5. If the estimate is above `microTargetTokens`, Claude Code writes a summary.
+6. If masking would save less than `minSavedShare` of the conversation, or would change nothing, it
+   leaves the conversation alone: no masking, no summary, and no model call. Masking rewrites the
+   transcript, so your next request writes all of it to the cache again. A small saving is not
+   worth that.
+7. Otherwise, it installs the masked transcript with no model call.
 
 The automatic request appears in the transcript as a manual `/compact` line.
 
@@ -152,9 +158,12 @@ summarized at 18:41: 285k → 19k summary
 - `shortened` counts tool results cut to their head and tail. Errors cut to their start are listed
   only when there are some.
 - A summarized compaction also writes one debug-log line, `summary chosen: ...`, for tuning the
-  mod. It holds why trimming wasn't enough (`nothing to trim`, or `trim estimate 200k, target 150k`)
-  and the share of the summary request input read from cache (`summary request 99% cached`). Each
-  part is left out when unknown, and the line is omitted when both are.
+  mod. It holds why trimming wasn't enough (`trim estimate 200k, target 150k`) and the share of the
+  summary request input read from cache (`summary request 99% cached`). Each part is left out when
+  unknown, and the line is omitted when both are.
+- `not trimmed at` appears when masking would save less than `minSavedShare`, as in
+  `not trimmed at 11:04 after 1 min idle: a trim would save ~0 of 44k tokens, under the 10% minimum`.
+  It does not set a status.
 - `not compacted:` appears for a known-small or late conversation, or a failed compaction. It does
   not set a status.
 

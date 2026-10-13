@@ -1,5 +1,6 @@
 import type { ContextCategory, ContextCategoryKind, ModelUsage, On, SessionContextBreakdown, SessionMessage, TurnCompleteInput } from 'claude-code'
 import { type Engine, describe, expect, mock, test, tier } from 'claude-code/testing'
+import { readSettings } from '../hooks/register.ts'
 
 // Adapted from davidar/claude-idle-compact, tests/register.test.ts at commit
 // 35ec925345acfce26bc0ba260c1f611dceab1148 (MIT; see LICENSE). The test's command.run hook stands
@@ -233,7 +234,7 @@ describe('reloading', () => {
     expect(seen.compacts.length).toBe(1)
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
     expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
-    expect(seen.debug).toEqual(['summary chosen: nothing to trim'])
+    expect(seen.debug).toEqual(['summary chosen: trim estimate 180k, target 150k'])
   })
 
   test('a freshly loaded module re-arms from the stored turn', async ($, on) => {
@@ -245,7 +246,7 @@ describe('reloading', () => {
     await clock.settle()
     expect(seen.compacts.length).toBe(1)
     expect(seen.logs).toEqual(['summarized at 18:20 after 50 min idle: 200k → 12k summary'])
-    expect(seen.debug).toEqual(['summary chosen: nothing to trim'])
+    expect(seen.debug).toEqual(['summary chosen: trim estimate 180k, target 150k'])
   })
 
   test('a reload past the deadline does nothing and says nothing', async ($, on) => {
@@ -356,7 +357,7 @@ describe('when it fires', () => {
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    expect(seen.compacts.length).toBe(1)
+    expect(seen.commands.length).toBe(1)
   })
 
   test('the minTokens option sets the floor', { options: { minTokens: 10_000 } }, async ($, on) => {
@@ -364,7 +365,7 @@ describe('when it fires', () => {
     await turnDone($)
     await clock.advance(50 * MIN + 1)
     await clock.settle()
-    expect(seen.compacts.length).toBe(1)
+    expect(seen.commands.length).toBe(1)
   })
 
   test('without a breakdown, the whole context counts', async ($, on) => {
@@ -382,7 +383,7 @@ describe('when it fires', () => {
     await clock.settle()
     const status = 'summarized at 18:50: 200k → 12k summary'
     expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
-    expect(seen.debug).toEqual(['summary chosen: nothing to trim'])
+    expect(seen.debug).toEqual(['summary chosen: trim estimate 180k, target 150k'])
     expect(seen.status).toEqual([status])
     await turnStart($)
     expect(seen.status).toEqual([status, undefined])
@@ -395,7 +396,7 @@ describe('when it fires', () => {
     await clock.advance(50 * MIN + 1)
     await clock.settle()
     expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
-    expect(seen.debug).toEqual(['summary chosen: nothing to trim; summary request 99% cached'])
+    expect(seen.debug).toEqual(['summary chosen: trim estimate 180k, target 150k; summary request 99% cached'])
   })
 
   test('a timer that fires late, after the machine slept, does not compact and says why', async ($, on) => {
@@ -513,5 +514,82 @@ describe('choosing the branch', () => {
     expect(seen.compacts[0]).toContain('at 18:50, after 50 minutes idle')
     expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
     expect(seen.debug).toEqual(['summary chosen: trim estimate 166k, target 100'])
+  })
+
+  test('leaves the conversation alone when a trim would save under 10% of it', { options: { microTargetTokens: 1_000_000 } }, async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 320_000, transcript: READ })
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.commands.length).toBe(1)
+    expect(seen.compacts).toEqual([])
+    expect(seen.isCompacted).toBe(false)
+    expect(seen.logs).toEqual(['not trimmed at 18:50 after 50 min idle: a trim would save ~14k of 300k tokens, under the 10% minimum'])
+    expect(seen.debug).toEqual([])
+    expect(seen.status).toEqual([])
+  })
+
+  test('a conversation left alone is not compacted again until the next turn', { options: { microTargetTokens: 1_000_000 } }, async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 320_000, transcript: READ })
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    await clock.advance(10 * 60 * MIN)
+    await clock.settle()
+    expect(seen.commands.length).toBe(1)
+    await turnStart($)
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.commands.length).toBe(2)
+  })
+
+  test('leaves a conversation under the target alone when there is nothing to trim', async ($, on) => {
+    const { clock, seen } = setup($, on, { tokens: 61_000, messages: 41_000 })
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.compacts).toEqual([])
+    expect(seen.logs).toEqual(['not trimmed at 18:50 after 50 min idle: a trim would save ~0 of 41k tokens, under the 10% minimum'])
+    expect(seen.status).toEqual([])
+  })
+
+  test('writes the summary when there is nothing to trim and the conversation is over the target', async ($, on) => {
+    const { clock, seen } = setup($, on)
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.compacts.length).toBe(1)
+    expect(seen.logs).toEqual(['summarized at 18:50 after 50 min idle: 200k → 12k summary'])
+  })
+})
+
+describe('the minSavedShare option', () => {
+  // A trim of READ saves about 14k of a 300k conversation: 4.7%.
+  const run = async ($: Engine, on: On) => {
+    const { clock, seen } = setup($, on, { tokens: 320_000, transcript: READ })
+    await turnDone($)
+    await clock.advance(50 * MIN + 1)
+    await clock.settle()
+    expect(seen.logs.length).toBe(1)
+    return seen.logs[0]!
+  }
+
+  test('sets the minimum saving', { options: { microTargetTokens: 1_000_000, minSavedShare: 0.04 } }, async ($, on) => {
+    expect(await run($, on)).toStartWith('trimmed at 18:50 after 50 min idle: 300k → ~286k tokens')
+  })
+
+  test('0 trims whatever the saving', { options: { microTargetTokens: 1_000_000, minSavedShare: 0 } }, async ($, on) => {
+    expect(await run($, on)).toStartWith('trimmed at 18:50')
+  })
+
+  test('an empty value is the 10% default', { options: { microTargetTokens: 1_000_000, minSavedShare: '' } }, async ($, on) => {
+    expect(await run($, on)).toEndWith('under the 10% minimum')
+  })
+
+  test('a value over 1, under 0 or not a number is the 10% default', () => {
+    for (const minSavedShare of [1.5, -0.2, 'lots', true, ['0.5']]) expect(readSettings({ minSavedShare }).minSavedShare).toBe(0.1)
+    expect(readSettings({ minSavedShare: 1 }).minSavedShare).toBe(1)
+    expect(readSettings({ minSavedShare: '0.25' }).minSavedShare).toBe(0.25)
   })
 })

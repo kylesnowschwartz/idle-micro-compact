@@ -96,15 +96,28 @@ export function estimateAfter({ conversationTokens, original, compacted, dropped
   return Math.max(0, Math.round(conversationTokens - removedTokens))
 }
 
-export type Branch = { kind: 'micro' } | { kind: 'summary'; reason: 'over-target' | 'nothing-to-mask' }
+export type Branch = { kind: 'micro' } | { kind: 'summary' } | { kind: 'leave-alone' }
+
+/** The limits chooseBranch weighs the estimate against. */
+export type BranchLimits = {
+  // the conversation size at or under which a trim is enough
+  microTargetTokens: number
+  // the share of the conversation a trim must save to be worth rewriting the transcript
+  minSavedShare: number
+}
+
+type BranchInput = { conversationTokens: number; estimate: number; stats: MaskStats }
 
 /**
- * Micro-compaction when it removed something and is estimated to land at or under the target;
- * the model's summary otherwise. A pass that removed nothing would rewrite the transcript for no
- * saving, while the conversation is still over the floor that made compacting worth it.
+ * The summary when the trim is estimated to land over the target, whatever it saves. Under it, the
+ * conversation is left alone when the trim removes nothing or saves less than `minSavedShare` of
+ * it: a trim rewrites the transcript, so the next request writes all of it to the cache again for
+ * next to no saving. A trim otherwise.
  */
-export function chooseBranch(estimate: number, target: number, stats: MaskStats): Branch {
+export function chooseBranch({ conversationTokens, estimate, stats }: BranchInput, limits: BranchLimits): Branch {
+  if (estimate > limits.microTargetTokens) return { kind: 'summary' }
   const changed = stats.masked + stats.trimmedToHeadAndTail + stats.errorsCutToStart + stats.thinkingDropped
-  if (changed === 0) return { kind: 'summary', reason: 'nothing-to-mask' }
-  return estimate <= target ? { kind: 'micro' } : { kind: 'summary', reason: 'over-target' }
+  const saved = conversationTokens - estimate
+  if (changed === 0 || saved < limits.minSavedShare * conversationTokens) return { kind: 'leave-alone' }
+  return { kind: 'micro' }
 }

@@ -1,7 +1,7 @@
 import type { EngineInterface, Next, PluginOptions, Register, SessionCompactInput, SessionContextUsage, Timer } from 'claude-code'
 import { chooseBranch, estimateAfter, thinkingTokensIn } from './decide.ts'
 import { maskOldToolResults } from './mask.ts'
-import { type Outcome, type When, approx, microLine, summaryLine } from './lines.ts'
+import { type Outcome, type When, approx, leftAloneLine, microLine, summaryLine } from './lines.ts'
 
 const MINUTE_MS = 60_000
 // The prompt cache's lifetime from the last request; past it the cache is cold.
@@ -14,6 +14,9 @@ const DEFAULT_MIN_TOKENS = 40_000
 // At or under this many conversation tokens after masking old tool results, the masked transcript
 // is small enough to come back to, and no summary is written.
 const DEFAULT_MICRO_TARGET_TOKENS = 150_000
+// A trim that saves less than this share of the conversation is not worth rewriting the
+// transcript: the next request writes all of it to the cache again.
+const DEFAULT_MIN_SAVED_SHARE = 0.1
 
 // How the instructions of this module's own /compact open. Its session.compact hook looks for this
 // opening to tell its own call apart from a person's /compact or another plugin's. The rest of the
@@ -33,6 +36,8 @@ type Settings = {
   minTokens: number
   // the conversation size at or under which masking old tool results is enough
   microTargetTokens: number
+  // the share of the conversation a trim must save, from 0 to 1
+  minSavedShare: number
 }
 
 /** When the idle time began, and the last moment the cache is still warm enough to compact. */
@@ -62,13 +67,24 @@ function nonNegative(raw: unknown): number | undefined {
   return Number.isFinite(n) && n >= 0 ? n : undefined
 }
 
-/** The idle time assumes the 1-hour cache: the mod is no use on a 5-minute one. */
-function readSettings(options: PluginOptions): Settings {
+function shareOf(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' && typeof raw !== 'string') return undefined
+  const n = nonNegative(raw)
+  return n !== undefined && n <= 1 ? n : undefined
+}
+
+/**
+ * The idle time assumes the 1-hour cache: the mod is no use on a 5-minute one. A value out of its
+ * range, or not a number, is its default: the host checks options against plugin.json, but a value
+ * that reaches the module unchecked must not set a share over 1 or a negative size.
+ */
+export function readSettings(options: PluginOptions): Settings {
   const idleMinutes = nonNegative(options.idleMinutes)
   return {
     idleMs: idleMinutes ? idleMinutes * MINUTE_MS : HOUR_MS - MARGIN_MS,
     minTokens: nonNegative(options.minTokens) ?? DEFAULT_MIN_TOKENS,
     microTargetTokens: nonNegative(options.microTargetTokens) ?? DEFAULT_MICRO_TARGET_TOKENS,
+    minSavedShare: shareOf(options.minSavedShare) ?? DEFAULT_MIN_SAVED_SHARE,
   }
 }
 
@@ -146,9 +162,11 @@ async function sentBackThinkingTokens($: EngineInterface) {
 type Compaction = { e: SessionCompactInput; next: Next<'session.compact'>; conversationTokens: number; state: State; settings: Settings }
 
 /**
- * Masks when that is estimated to land under the target, answering with no model call; hands the
- * call down to core's summary otherwise. `conversationTokens` is the Messages row just before the
- * call: the event carries the transcript but not its size.
+ * Masks when that is estimated to land under the target and save enough, answering with no model
+ * call; skips the compaction, leaving the conversation as it is, when the trim would save too
+ * little; hands the call down to core's summary when the trim would land over the target.
+ * `conversationTokens` is the Messages row just before the call: the event carries the transcript
+ * but not its size.
  */
 async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens, state, settings }: Compaction) {
   const { messages, stats } = maskOldToolResults(e.messages)
@@ -157,10 +175,14 @@ async function maskOrSummarize($: EngineInterface, { e, next, conversationTokens
   const estimate = estimateAfter({
     conversationTokens, original: e.messages, compacted: messages, droppedThinkingTokens, maskedMediaTokens: stats.mediaTokens,
   })
-  const branch = chooseBranch(estimate, settings.microTargetTokens, stats)
+  const branch = chooseBranch({ conversationTokens, estimate, stats }, settings)
   if (branch.kind === 'micro') {
     state.outcome = { branch, conversationTokens, estimate, stats }
     return { messages, tokensBefore: conversationTokens, tokensAfter: estimate }
+  }
+  if (branch.kind === 'leave-alone') {
+    state.outcome = { branch, conversationTokens, estimate, stats }
+    return { skip: 'a trim would save too little' }
   }
   const summary = await next(e)
   state.outcome = { branch, conversationTokens, estimate, stats, summary }
@@ -182,8 +204,15 @@ async function runIdleCompaction($: EngineInterface, state: State, conversationT
 
 type Report = { outcome: Outcome; when: When; contextTokens: number; settings: Settings; isOvertaken: () => boolean }
 
-/** Writes the line for a compaction that stands to the transcript, and pins it as the status. */
+/**
+ * Writes the line for a compaction that stands to the transcript, and pins it as the status. A
+ * conversation left alone gets the transcript line alone, as one under the floor does.
+ */
 async function report($: EngineInterface, state: State, { outcome, when, contextTokens, settings, isOvertaken }: Report) {
+  if (outcome.branch.kind === 'leave-alone') {
+    $.ui.log(leftAloneLine({ when, outcome, minSavedShare: settings.minSavedShare }))
+    return
+  }
   const { summary } = outcome
   // A summary a hook beneath vetoed has left its own notice.
   if (outcome.branch.kind === 'summary' && summary?.messages === undefined) return
@@ -272,9 +301,11 @@ async function rearm($: EngineInterface, state: State, settings: Settings) {
  * runs from the last model request: the last time the cache was refreshed. When it fires on time
  * and the conversation is over the floor, it compacts while the cache is still warm: by masking
  * old tool results and dropping thinking when that is estimated to leave the conversation under
- * the target, with no model call, and by the model's summary otherwise. Either way it leaves a note in the
- * transcript and the status line. The time of the last turn is kept in `$.state`, so a reload of
- * the module, which cancels the timer, re-arms it for the time left.
+ * the target, with no model call, and by the model's summary when it would not. A trim that would
+ * save too little of the conversation is not made, and nothing else is either: the conversation is
+ * left as it is. Each outcome leaves a note in the transcript; a compaction also pins the status
+ * line. The time of the last turn is kept in `$.state`, so a reload of the module, which cancels
+ * the timer, re-arms it for the time left.
  */
 export const register: Register = (on, options) => {
   const settings = readSettings(options)

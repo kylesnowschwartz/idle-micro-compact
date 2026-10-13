@@ -2,7 +2,7 @@ import type { ApiMessage, ContextCategory, On, SessionCompactInput, SessionCompa
 import { type Engine, describe, expect, test, tier } from 'claude-code/testing'
 import { chooseBranch, estimateAfter, mediaTokens, thinkingTokensIn } from '../hooks/decide.ts'
 import { maskOldToolResults } from '../hooks/mask.ts'
-import { microLine, summaryLine } from '../hooks/lines.ts'
+import { leftAloneLine, microLine, summaryLine } from '../hooks/lines.ts'
 
 tier('user')
 
@@ -120,11 +120,34 @@ describe('the session.compact hook', () => {
     expect(result.messages).toEqual([SUMMARY])
   })
 
-  test('asks for the summary when there is nothing to mask', async ($, on) => {
+  test('skips the compaction, with no summary, when there is nothing to mask and the conversation is under the target', async ($, on) => {
+    const { summaries } = setup(on)
+    const result = await compact($, { messages: noReads })
+    expect(summaries).toEqual([])
+    expect(result.messages).toBeUndefined()
+    expect(typeof result.skip).toBe('string')
+  })
+
+  test('asks for the summary when there is nothing to mask and the conversation is over the target', { options: { microTargetTokens: 100 } }, async ($, on) => {
     const { summaries } = setup(on)
     const result = await compact($, { messages: noReads })
     expect(summaries).toEqual([IDLE])
     expect(result.messages).toEqual([SUMMARY])
+  })
+
+  test('skips the compaction, with no summary, when the trim would save under 10% of the conversation', { options: { microTargetTokens: 2_000_000 } }, async ($, on) => {
+    const { summaries } = setup(on, 1_000_000)
+    const result = await compact($, {})
+    expect(summaries).toEqual([])
+    expect(result.messages).toBeUndefined()
+    expect(typeof result.skip).toBe('string')
+  })
+
+  test('the minSavedShare option sets the minimum saving', { options: { microTargetTokens: 2_000_000, minSavedShare: 0.01 } }, async ($, on) => {
+    const { summaries } = setup(on, 1_000_000)
+    const result = await compact($, {})
+    expect(summaries).toEqual([])
+    expect(result.messages).toEqual(maskOldToolResults(transcript).messages)
   })
 
   test("leaves the person's own /compact alone", async ($, on) => {
@@ -283,20 +306,41 @@ describe('the thinking size', () => {
 describe('the branch', () => {
   const none = { masked: 0, mediaMasked: 0, mediaTokens: 0, trimmedToHeadAndTail: 0, errorsCutToStart: 0, thinkingDropped: 0 }
   const stats = { ...none, masked: 3, thinkingDropped: 1 }
+  const limits = { microTargetTokens: 150_000, minSavedShare: 0.1 }
 
   test('at the target is micro, over it the summary', () => {
-    expect(chooseBranch(150_000, 150_000, stats)).toEqual({ kind: 'micro' })
-    expect(chooseBranch(150_001, 150_000, stats)).toEqual({ kind: 'summary', reason: 'over-target' })
+    expect(chooseBranch({ conversationTokens: 200_000, estimate: 150_000, stats }, limits)).toEqual({ kind: 'micro' })
+    expect(chooseBranch({ conversationTokens: 200_000, estimate: 150_001, stats }, limits)).toEqual({ kind: 'summary' })
+  })
+
+  test('over the target is the summary, however little the trim saves', () => {
+    expect(chooseBranch({ conversationTokens: 200_000, estimate: 199_000, stats }, limits)).toEqual({ kind: 'summary' })
+  })
+
+  test('under the target, a saving under the minimum share leaves the conversation alone', () => {
+    // 44k → 43.6k saves under 10%
+    expect(chooseBranch({ conversationTokens: 44_000, estimate: 43_600, stats }, limits)).toEqual({ kind: 'leave-alone' })
+    expect(chooseBranch({ conversationTokens: 44_000, estimate: 39_601, stats }, limits)).toEqual({ kind: 'leave-alone' })
+  })
+
+  test('a saving of the minimum share or more is micro', () => {
+    expect(chooseBranch({ conversationTokens: 44_000, estimate: 39_600, stats }, limits)).toEqual({ kind: 'micro' })
+    expect(chooseBranch({ conversationTokens: 44_000, estimate: 10_000, stats }, limits)).toEqual({ kind: 'micro' })
   })
 
   test('any one change is enough: thinking, a trim or a cut error alone', () => {
-    expect(chooseBranch(10, 150_000, { ...none, thinkingDropped: 2 })).toEqual({ kind: 'micro' })
-    expect(chooseBranch(10, 150_000, { ...none, trimmedToHeadAndTail: 1 })).toEqual({ kind: 'micro' })
-    expect(chooseBranch(10, 150_000, { ...none, errorsCutToStart: 1 })).toEqual({ kind: 'micro' })
+    expect(chooseBranch({ conversationTokens: 1000, estimate: 10, stats: { ...none, thinkingDropped: 2 } }, limits)).toEqual({ kind: 'micro' })
+    expect(chooseBranch({ conversationTokens: 1000, estimate: 10, stats: { ...none, trimmedToHeadAndTail: 1 } }, limits)).toEqual({ kind: 'micro' })
+    expect(chooseBranch({ conversationTokens: 1000, estimate: 10, stats: { ...none, errorsCutToStart: 1 } }, limits)).toEqual({ kind: 'micro' })
   })
 
-  test('nothing removed is the summary, however small', () => {
-    expect(chooseBranch(10, 150_000, none)).toEqual({ kind: 'summary', reason: 'nothing-to-mask' })
+  test('nothing removed under the target leaves the conversation alone, even with no minimum share', () => {
+    expect(chooseBranch({ conversationTokens: 44_000, estimate: 44_000, stats: none }, limits)).toEqual({ kind: 'leave-alone' })
+    expect(chooseBranch({ conversationTokens: 44_000, estimate: 44_000, stats: none }, { ...limits, minSavedShare: 0 })).toEqual({ kind: 'leave-alone' })
+  })
+
+  test('nothing removed over the target is the summary', () => {
+    expect(chooseBranch({ conversationTokens: 200_000, estimate: 200_000, stats: none }, limits)).toEqual({ kind: 'summary' })
   })
 })
 
@@ -336,7 +380,7 @@ describe('the line', () => {
   })
 
   const usage = { input_tokens: 1_500, output_tokens: 800, cache_read_input_tokens: 198_000, cache_creation_input_tokens: 500 }
-  const overTarget = { branch: { kind: 'summary', reason: 'over-target' } as const, conversationTokens: 280_000, estimate: 200_000, stats: { ...none, masked: 2 } }
+  const overTarget = { branch: { kind: 'summary' } as const, conversationTokens: 280_000, estimate: 200_000, stats: { ...none, masked: 2 } }
   const at1841 = { at: '18:41', idleMin: 50 }
 
   test('summary over the target: sizes in the log, reason and cache share in the debug line', () => {
@@ -355,14 +399,17 @@ describe('the line', () => {
     )
   })
 
-  test('summary with nothing to mask says there is nothing to trim', () => {
-    const outcome = { branch: { kind: 'summary', reason: 'nothing-to-mask' } as const, conversationTokens: 60_000, estimate: 60_000, stats: none }
-    const result = { messages: [SUMMARY], tokensAfter: 5_000, usage }
-    const withUsage = summaryLine({ when, outcome, result, contextTokens: 80_000, targetTokens: 150_000 })
-    expect(withUsage.log).toBe('summarized at 18:50 after 50 min idle: 80k → 5k summary')
-    expect(withUsage.debug).toBe('summary chosen: nothing to trim; summary request 99% cached')
-    expect(summaryLine({ when, outcome, result: { messages: [SUMMARY], tokensAfter: 5_000 }, contextTokens: 80_000, targetTokens: 150_000 }).debug).toBe(
-      'summary chosen: nothing to trim',
+  test('left alone: what a trim would save, against the minimum share', () => {
+    const outcome = { branch: { kind: 'leave-alone' } as const, conversationTokens: 44_000, estimate: 43_900, stats: { ...none, thinkingDropped: 1 } }
+    expect(leftAloneLine({ when: { at: '11:04', idleMin: 1 }, outcome, minSavedShare: 0.1 })).toBe(
+      'not trimmed at 11:04 after 1 min idle: a trim would save ~100 of 44k tokens, under the 10% minimum',
+    )
+  })
+
+  test('left alone: a trim that removes nothing saves ~0, and a fractional share reads as it is', () => {
+    const outcome = { branch: { kind: 'leave-alone' } as const, conversationTokens: 44_000, estimate: 44_000, stats: none }
+    expect(leftAloneLine({ when, outcome, minSavedShare: 0.025 })).toBe(
+      'not trimmed at 18:50 after 50 min idle: a trim would save ~0 of 44k tokens, under the 2.5% minimum',
     )
   })
 
