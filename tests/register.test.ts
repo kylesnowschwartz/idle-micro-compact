@@ -675,7 +675,7 @@ describe('messages that carry reports or queued messages', () => {
     expect(seen.installed?.map((m) => m.handle)).not.toContain('t2')
     const after = estimateAfter({ conversationTokens: 120_000, original: transcript, compacted: seen.installed!, droppedThinkingTokens: 824, maskedMediaTokens: 0 })
     expect(approx(after)).not.toBe(approx(after - 10_706))
-    expect(seen.status).toEqual([`trimmed at 18:50: 120k → about ${approx(after)} tokens`])
+    expect(seen.status).toEqual([`trimmed at 18:50: 120k → ~${approx(after)} tokens`])
     expect(seen.debug).toEqual([KEPT_ONE])
   })
 
